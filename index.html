@@ -75,14 +75,19 @@
   </label>
   <label>Rattaat <input type="number" id="inFront" value="34" min="20" max="60" style="width:60px"> / <input type="number" id="inCog" value="14" min="10" max="40" style="width:60px"></label>
   <label>Massa <input type="number" id="inMass" value="85" min="40" max="150"> kg</label>
-  <label>Kaltevuus <input type="range" id="inGrade" min="-8" max="15" step="0.5" value="0"></label>
+  <label>Kaltevuus <button id="btnGradeDown" style="padding:6px 14px">−</button>
+    <input type="range" id="inGrade" min="-8" max="15" step="0.5" value="0">
+    <button id="btnGradeUp" style="padding:6px 14px">+</button></label>
+  <button id="btnSave">Tallenna CSV</button>
+  <button id="btnCopy">Kopioi CSV</button>
+  <button id="btnClear">Tyhjennä</button>
 </div>
 
 <details><summary>Loki</summary><pre id="log"></pre></details>
 
 <script>
 'use strict';
-const VERSION = 'v0.4';
+const VERSION = 'v0.5';
 document.getElementById('ver').textContent = VERSION;
 document.title = 'Polku ' + VERSION;
 // ---------- UUIDs (Bluetooth SIG) ----------
@@ -308,7 +313,14 @@ function tick() {
   if (S.running) {
     S.elapsed += DT; S.dist += S.speed * DT; S.energy += S.power * DT;
     if (Math.floor(S.elapsed) !== Math.floor(S.elapsed - DT))
-      S.samples.push({ t: Date.now(), p: Math.round(S.power), c: Math.round(S.cad), hr: S.hr, v: S.speed, d: S.dist, g: S.grade });
+    {
+      const vp = S.mode === 'vsim' ? vsimParams() : null;
+      S.samples.push({ t: new Date().toISOString(), el: Math.floor(S.elapsed), mode: S.mode, gear: S.gear + 1,
+        p: Math.round(S.power), c: Math.round(S.cad), hr: S.hr ?? '', v: (S.speed * 3.6).toFixed(2),
+        d: Math.round(S.dist), g: S.grade, tgt: S.target ?? '', k: S.k.toFixed(3),
+        gT: vp ? vp.gradeT : '', cw: vp ? vp.cw : '' });
+      if (S.samples.length % 10 === 0) try { localStorage.setItem('polku_samples', JSON.stringify(S.samples)); } catch {}
+    }
   }
   pushTarget();
   if (S.mode === 'vsim' && S.running && Math.floor(S.elapsed) % 30 === 0 && Math.floor(S.elapsed) !== Math.floor(S.elapsed - DT)) {
@@ -351,6 +363,40 @@ $('inCog').onchange = e => { S.cog = +e.target.value || 14; pushTarget(true); };
 $('inMass').onchange = e => { S.mass = +e.target.value || 85; };
 $('inGrade').oninput = e => { S.grade = +e.target.value; render(); };
 $('inGrade').onchange = () => pushTarget(true);
+function setGrade(g) { S.grade = Math.max(-8, Math.min(15, Math.round(g * 2) / 2)); $('inGrade').value = S.grade; render(); pushTarget(true); }
+$('btnGradeDown').onclick = () => setGrade(S.grade - 0.5);
+$('btnGradeUp').onclick = () => setGrade(S.grade + 0.5);
+
+// ---------- Recording export ----------
+const COLS = ['t','el','mode','gear','p','c','hr','v','d','g','tgt','k','gT','cw'];
+function csv() {
+  return '# Polku ' + VERSION + ', massa ' + S.mass + ' kg, rattaat ' + S.front + '/' + S.cog + '\n' +
+    COLS.join(',') + '\n' + S.samples.map(r => COLS.map(c => r[c]).join(',')).join('\n') + '\n';
+}
+function fileName() { return 'polku_' + new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-') + '.csv'; }
+$('btnSave').onclick = async () => {
+  if (!S.samples.length) { setStatus('Ei tallennettavaa – paina Aloita'); return; }
+  const file = new File([csv()], fileName(), { type: 'text/csv' });
+  try {
+    if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file] }); return; }
+  } catch (e) { if (e.name === 'AbortError') return; log('Jako: ' + errText(e)); }
+  const a = document.createElement('a'); a.href = URL.createObjectURL(file); a.download = file.name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setStatus('CSV ladattu (' + S.samples.length + ' riviä)');
+};
+$('btnCopy').onclick = async () => {
+  try { await navigator.clipboard.writeText(csv()); setStatus('CSV kopioitu leikepöydälle (' + S.samples.length + ' riviä)'); }
+  catch (e) { log('Kopiointi: ' + errText(e)); setStatus('Kopiointi ei onnistunut'); }
+};
+$('btnClear').onclick = () => {
+  if (!confirm('Tyhjennetäänkö tallennettu suoritus?')) return;
+  S.samples = []; S.elapsed = 0; S.dist = 0; S.energy = 0; S.running = false;
+  $('btnRun').textContent = '▶ Aloita';
+  try { localStorage.removeItem('polku_samples'); } catch {}
+  render();
+};
+try { const old = JSON.parse(localStorage.getItem('polku_samples') || '[]');
+  if (old.length) { S.samples = old; log(`Palautettiin ${old.length} riviä edellisestä istunnosta`); } } catch {}
 document.addEventListener('keydown', e => {
   // Arrow keys, +/- and PageUp/PageDown (Bluetooth page turners / remotes)
   if (['ArrowUp', 'ArrowRight', '+', 'PageDown', 'k'].includes(e.key)) { shift(+1); e.preventDefault(); }
