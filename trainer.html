@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="fi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Polku – trainer v1</title>
+<style>
+  :root { --bg:#0e0f11; --panel:#17191c; --line:#2a2d32; --fg:#e8e6e1; --dim:#8a8d93; --acc:#f2b33d; --ok:#5cc28a; --bad:#e0605a; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif; }
+  body { display:flex; flex-direction:column; padding:env(safe-area-inset-top) 12px env(safe-area-inset-bottom); user-select:none; }
+  header { display:flex; gap:8px; align-items:center; flex-wrap:wrap; padding:10px 0; }
+  header h1 { font-size:18px; margin:0 12px 0 0; letter-spacing:.04em; }
+  button, select, input { font:inherit; color:var(--fg); background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:9px 14px; }
+  button:active { background:#24272b; }
+  button.on { border-color:var(--ok); color:var(--ok); }
+  .dot { width:9px; height:9px; border-radius:50%; background:var(--bad); display:inline-block; margin-right:6px; }
+  .dot.ok { background:var(--ok); }
+  .grid { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; flex:1; align-content:start; }
+  .tile { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:12px 14px; }
+  .tile .k { font-size:12px; color:var(--dim); text-transform:uppercase; letter-spacing:.08em; }
+  .tile .v { font-size:clamp(30px,6vw,64px); font-weight:600; font-variant-numeric:tabular-nums; line-height:1.1; }
+  .tile .u { font-size:14px; color:var(--dim); margin-left:4px; }
+  .tile.big { grid-column:span 2; }
+  .tile.big .v { font-size:clamp(48px,11vw,120px); }
+  .gear .v { color:var(--acc); }
+  .shift { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:10px 0; }
+  .shift button { font-size:34px; padding:26px 0; border-radius:16px; }
+  .settings { display:flex; gap:14px; flex-wrap:wrap; align-items:center; padding:6px 0 10px; color:var(--dim); font-size:14px; }
+  .settings label { display:flex; gap:6px; align-items:center; }
+  .settings input[type=number] { width:76px; padding:6px 8px; }
+  .settings input[type=range] { width:180px; }
+  details { color:var(--dim); font-size:12px; margin-bottom:8px; }
+  pre { max-height:140px; overflow:auto; background:var(--panel); padding:8px; border-radius:8px; white-space:pre-wrap; }
+  @media (max-width:700px){ .grid{grid-template-columns:repeat(2,1fr);} }
+</style>
+</head>
+<body>
+<header>
+  <h1>POLKU</h1>
+  <button id="btnTrainer"><span class="dot" id="dotTrainer"></span>Trainer</button>
+  <button id="btnHr"><span class="dot" id="dotHr"></span>Syke</button>
+  <button id="btnDemo">Demo</button>
+  <button id="btnRun">▶ Aloita</button>
+  <span id="status" style="color:var(--dim);font-size:13px"></span>
+</header>
+
+<div class="grid">
+  <div class="tile big"><div class="k">Teho</div><div class="v"><span id="vPower">–</span><span class="u">W</span></div></div>
+  <div class="tile big gear"><div class="k">Vaihde</div><div class="v"><span id="vGear">–</span><span class="u" id="vRatio"></span></div></div>
+  <div class="tile"><div class="k">Kadenssi</div><div class="v"><span id="vCad">–</span><span class="u">rpm</span></div></div>
+  <div class="tile"><div class="k">Nopeus</div><div class="v"><span id="vSpeed">–</span><span class="u">km/h</span></div></div>
+  <div class="tile"><div class="k">Syke</div><div class="v"><span id="vHr">–</span><span class="u">bpm</span></div></div>
+  <div class="tile"><div class="k">Tavoite</div><div class="v"><span id="vTarget">–</span><span class="u">W</span></div></div>
+  <div class="tile"><div class="k">Aika</div><div class="v"><span id="vTime">0:00</span></div></div>
+  <div class="tile"><div class="k">Matka</div><div class="v"><span id="vDist">0.00</span><span class="u">km</span></div></div>
+  <div class="tile"><div class="k">Keskiteho</div><div class="v"><span id="vAvg">–</span><span class="u">W</span></div></div>
+  <div class="tile"><div class="k">Kaltevuus</div><div class="v"><span id="vGrade">0.0</span><span class="u">%</span></div></div>
+</div>
+
+<div class="shift">
+  <button id="btnDown">− Kevyempi</button>
+  <button id="btnUp">+ Raskaampi</button>
+</div>
+
+<div class="settings">
+  <label>Tila
+    <select id="selMode">
+      <option value="gears">Virtuaalivaihteet (ERG)</option>
+      <option value="sim">Simulaatio (kaltevuus)</option>
+    </select>
+  </label>
+  <label>Massa <input type="number" id="inMass" value="85" min="40" max="150"> kg</label>
+  <label>Kaltevuus <input type="range" id="inGrade" min="-8" max="15" step="0.5" value="0"></label>
+</div>
+
+<details><summary>Loki</summary><pre id="log"></pre></details>
+
+<script>
+'use strict';
+// ---------- UUIDs (Bluetooth SIG) ----------
+const FTMS = 0x1826, IBD = 0x2AD2, CP = 0x2AD9, FM_STATUS = 0x2ADA, PWR_RANGE = 0x2AD8;
+const HRS = 0x180D, HRM = 0x2A37;
+
+// ---------- Virtual gearing (24 ratios, approx. Zwift-like spread) ----------
+const RATIOS = [0.75,0.87,0.99,1.11,1.23,1.38,1.53,1.68,1.86,2.04,2.22,2.40,
+                2.61,2.82,3.03,3.24,3.49,3.74,3.99,4.24,4.54,4.84,5.14,5.49];
+const WHEEL = 2.105; // m, 700x25c
+
+// ---------- Physics ----------
+const P = { g:9.81, rho:1.2, cda:0.32, crr:0.004, eff:0.97 };
+
+// ---------- State ----------
+const S = {
+  gear: 11, mode: 'gears', grade: 0, mass: 85,
+  power: 0, cad: 0, cadEma: 0, hr: null, speed: 0, dist: 0,
+  target: null, lastSent: null, lastSentAt: 0, shiftedAt: 0,
+  running: false, elapsed: 0, energy: 0, samples: [],
+  demo: false, connected: false, pwrMin: 0, pwrMax: 1500,
+};
+const $ = id => document.getElementById(id);
+const log = m => { const el = $('log'); el.textContent = `${new Date().toLocaleTimeString()} ${m}\n` + el.textContent.slice(0, 5000); };
+const setStatus = m => { $('status').textContent = m; };
+
+// ---------- FTMS control point (one command at a time) ----------
+let cpChar = null, cpPending = null, cpBusy = false;
+
+function cpSend(bytes) {
+  if (!cpChar || cpBusy) return Promise.resolve(false);
+  cpBusy = true;
+  return new Promise(resolve => {
+    const done = ok => { clearTimeout(t); cpPending = null; cpBusy = false; resolve(ok); };
+    const t = setTimeout(() => { log(`CP 0x${bytes[0].toString(16)} aikakatkaisu`); done(false); }, 2500);
+    cpPending = { op: bytes[0], done };
+    const buf = new Uint8Array(bytes);
+    const w = cpChar.writeValueWithResponse ? cpChar.writeValueWithResponse(buf) : cpChar.writeValue(buf);
+    w.catch(e => { log('CP kirjoitus epäonnistui: ' + e.message); done(false); });
+  });
+}
+function onCp(e) {
+  const dv = e.target.value;
+  if (dv.getUint8(0) !== 0x80) return;
+  const op = dv.getUint8(1), res = dv.getUint8(2);
+  if (res !== 1) log(`CP 0x${op.toString(16)} vastaus ${res}`);
+  if (cpPending && cpPending.op === op) cpPending.done(res === 1);
+}
+const i16 = v => { v = Math.round(v); return [v & 0xff, (v >> 8) & 0xff]; };
+const cmdRequestControl = () => cpSend([0x00]);
+const cmdStart = () => cpSend([0x07]);
+const cmdTargetPower = w => cpSend([0x05, ...i16(w)]);
+const cmdSim = gradePct => cpSend([0x11, ...i16(0), ...i16(gradePct * 100),
+  Math.round(P.crr / 0.0001), Math.round(0.5 * P.rho * P.cda / 0.01) /* Cw = ½·ρ·CdA, kg/m */]);
+
+// ---------- Indoor Bike Data parser ----------
+function parseIBD(dv) {
+  const f = dv.getUint16(0, true); let o = 2; const r = {};
+  if (!(f & 0x0001)) { r.speed = dv.getUint16(o, true) / 100; o += 2; }   // km/h
+  if (f & 0x0002) o += 2;                                                  // avg speed
+  if (f & 0x0004) { r.cad = dv.getUint16(o, true) / 2; o += 2; }           // rpm
+  if (f & 0x0008) o += 2;                                                  // avg cadence
+  if (f & 0x0010) o += 3;                                                  // total distance
+  if (f & 0x0020) o += 2;                                                  // resistance
+  if (f & 0x0040) { r.power = dv.getInt16(o, true); o += 2; }              // W
+  if (f & 0x0080) o += 2;                                                  // avg power
+  if (f & 0x0100) o += 5;                                                  // energy
+  if (f & 0x0200) { r.hr = dv.getUint8(o); o += 1; }
+  return r;
+}
+function onIBD(e) {
+  const r = parseIBD(e.target.value);
+  if (r.power !== undefined) S.power = Math.max(0, r.power);
+  if (r.cad !== undefined) S.cad = r.cad;
+  if (r.hr && !hrDevice) S.hr = r.hr;
+}
+
+// ---------- Connect trainer ----------
+let trainer = null;
+async function connectTrainer() {
+  if (!navigator.bluetooth) { alert('Selain ei tue Web Bluetoothia. Käytä Chromea (Mac) tai Bluefyä (iPad).'); return; }
+  try {
+    if (!trainer) {
+      trainer = await navigator.bluetooth.requestDevice({
+        filters: [{ services: [FTMS] }, { namePrefix: 'Zwift' }, { namePrefix: 'KICKR' }],
+        optionalServices: [FTMS],
+      });
+      trainer.addEventListener('gattserverdisconnected', () => {
+        S.connected = false; cpChar = null; cpBusy = false; updateDots(); setStatus('Trainer irti – paina Trainer yhdistääksesi uudelleen');
+      });
+    }
+    setStatus('Yhdistetään ' + (trainer.name || 'traineriin') + '…');
+    const server = await trainer.gatt.connect();
+    const svc = await server.getPrimaryService(FTMS);
+    try {
+      const pr = await (await svc.getCharacteristic(PWR_RANGE)).readValue();
+      S.pwrMin = pr.getInt16(0, true); S.pwrMax = pr.getInt16(2, true);
+      log(`Tehoalue ${S.pwrMin}–${S.pwrMax} W`);
+    } catch { log('Tehoaluetta ei saatu, käytetään oletusta'); }
+    cpChar = await svc.getCharacteristic(CP);
+    cpChar.addEventListener('characteristicvaluechanged', onCp);
+    await cpChar.startNotifications();
+    const ibd = await svc.getCharacteristic(IBD);
+    ibd.addEventListener('characteristicvaluechanged', onIBD);
+    await ibd.startNotifications();
+    try {
+      const st = await svc.getCharacteristic(FM_STATUS);
+      st.addEventListener('characteristicvaluechanged', e => log('Status: ' + [...new Uint8Array(e.target.value.buffer)].map(b => b.toString(16)).join(' ')));
+      await st.startNotifications();
+    } catch {}
+    const ok = await cmdRequestControl();
+    log('Request Control: ' + (ok ? 'OK' : 'ei kuitattu'));
+    await cmdStart();
+    S.connected = true; S.lastSent = null; updateDots();
+    setStatus('Yhdistetty: ' + (trainer.name || 'trainer'));
+    pushTarget(true);
+  } catch (e) { log('Yhteysvirhe: ' + e.message); setStatus('Yhteys epäonnistui'); }
+}
+
+// ---------- Connect heart rate ----------
+let hrDevice = null;
+async function connectHr() {
+  if (!navigator.bluetooth) return;
+  try {
+    hrDevice = hrDevice || await navigator.bluetooth.requestDevice({ filters: [{ services: [HRS] }] });
+    const ch = await (await (await hrDevice.gatt.connect()).getPrimaryService(HRS)).getCharacteristic(HRM);
+    ch.addEventListener('characteristicvaluechanged', e => {
+      const dv = e.target.value; S.hr = (dv.getUint8(0) & 1) ? dv.getUint16(1, true) : dv.getUint8(1);
+    });
+    await ch.startNotifications();
+    hrDevice.addEventListener('gattserverdisconnected', () => { $('dotHr').classList.remove('ok'); });
+    $('dotHr').classList.add('ok');
+  } catch (e) { log('Syke: ' + e.message); }
+}
+
+// ---------- Virtual gear → target power ----------
+function resistForce(v, gradePct) {
+  const th = Math.atan(gradePct / 100);
+  return S.mass * P.g * (P.crr * Math.cos(th) + Math.sin(th)) + 0.5 * P.rho * P.cda * v * v;
+}
+function gearSpeed() { return S.cadEma / 60 * RATIOS[S.gear] * WHEEL; } // m/s
+function computeTarget() {
+  const v = gearSpeed();
+  const w = v * resistForce(v, S.grade) / P.eff;
+  return Math.round(Math.min(S.pwrMax, Math.max(Math.max(S.pwrMin, 0), w)));
+}
+async function pushTarget(force = false) {
+  if (S.demo || !S.connected) return;
+  const now = performance.now();
+  if (S.mode === 'sim') {
+    if (force || S.lastSent !== S.grade) { if (await cmdSim(S.grade)) S.lastSent = S.grade; }
+    return;
+  }
+  const t = S.target;
+  if (t === null) return;
+  const recentShift = now - S.shiftedAt < 300;
+  const due = force || recentShift || S.lastSent === null ||
+              (now - S.lastSentAt > 1000 && Math.abs(t - S.lastSent) >= 3) || now - S.lastSentAt > 5000;
+  if (!due) return;
+  if (await cmdTargetPower(t)) { S.lastSent = t; S.lastSentAt = performance.now(); }
+}
+function shift(d) {
+  const g = Math.min(RATIOS.length - 1, Math.max(0, S.gear + d));
+  if (g === S.gear) return;
+  S.gear = g; S.shiftedAt = performance.now();
+  if (S.mode === 'gears') { S.target = computeTarget(); pushTarget(true); }
+  render();
+}
+
+// ---------- Main loop (4 Hz) ----------
+const DT = 0.25;
+function tick() {
+  if (S.demo) {
+    const t = performance.now() / 1000;
+    S.cad = Math.max(0, 86 + 6 * Math.sin(t / 7) + (Math.random() - .5) * 3);
+    const goal = S.mode === 'gears' ? (S.target ?? 150) : 180 + 20 * Math.sin(t / 11);
+    S.power = Math.max(0, S.power + (goal - S.power) * 0.35 + (Math.random() - .5) * 6);
+    if (!hrDevice) S.hr = Math.round(120 + S.power / 10);
+  }
+  S.cadEma = S.cadEma ? S.cadEma + 0.3 * (S.cad - S.cadEma) : S.cad;
+  if (S.mode === 'gears') S.target = computeTarget(); else S.target = null;
+
+  // Bike speed from measured power (with inertia)
+  const v = S.speed, prop = S.power * P.eff / Math.max(v, 1);
+  S.speed = Math.max(0, v + (prop - resistForce(v, S.grade)) / (S.mass + 1) * DT);
+  if (S.speed < 0.05 && S.power < 1) S.speed = 0;
+
+  if (S.running) {
+    S.elapsed += DT; S.dist += S.speed * DT; S.energy += S.power * DT;
+    if (Math.floor(S.elapsed) !== Math.floor(S.elapsed - DT))
+      S.samples.push({ t: Date.now(), p: Math.round(S.power), c: Math.round(S.cad), hr: S.hr, v: S.speed, d: S.dist, g: S.grade });
+  }
+  pushTarget();
+  render();
+}
+
+// ---------- Render ----------
+const fmtTime = s => { s = Math.floor(s); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
+  return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0'); };
+function render() {
+  $('vPower').textContent = Math.round(S.power);
+  $('vCad').textContent = Math.round(S.cad);
+  $('vSpeed').textContent = (S.speed * 3.6).toFixed(1);
+  $('vHr').textContent = S.hr ?? '–';
+  $('vGear').textContent = S.mode === 'gears' ? S.gear + 1 : '–';
+  $('vRatio').textContent = S.mode === 'gears' ? RATIOS[S.gear].toFixed(2) : '';
+  $('vTarget').textContent = S.target ?? '–';
+  $('vTime').textContent = fmtTime(S.elapsed);
+  $('vDist').textContent = (S.dist / 1000).toFixed(2);
+  $('vAvg').textContent = S.elapsed > 0 ? Math.round(S.energy / S.elapsed) : '–';
+  $('vGrade').textContent = S.grade.toFixed(1);
+}
+function updateDots() {
+  $('dotTrainer').classList.toggle('ok', S.connected || S.demo);
+  $('btnDemo').classList.toggle('on', S.demo);
+}
+
+// ---------- UI wiring ----------
+$('btnTrainer').onclick = connectTrainer;
+$('btnHr').onclick = connectHr;
+$('btnDemo').onclick = () => { S.demo = !S.demo; updateDots(); setStatus(S.demo ? 'Demotila – ei traineria' : ''); };
+$('btnRun').onclick = () => { S.running = !S.running; $('btnRun').textContent = S.running ? '❚❚ Tauko' : '▶ Jatka'; keepAwake(); };
+$('btnUp').onclick = () => shift(+1);
+$('btnDown').onclick = () => shift(-1);
+$('selMode').onchange = e => { S.mode = e.target.value; S.lastSent = null; pushTarget(true); render(); };
+$('inMass').onchange = e => { S.mass = +e.target.value || 85; };
+$('inGrade').oninput = e => { S.grade = +e.target.value; render(); };
+$('inGrade').onchange = () => pushTarget(true);
+document.addEventListener('keydown', e => {
+  // Arrow keys, +/- and PageUp/PageDown (Bluetooth page turners / remotes)
+  if (['ArrowUp', 'ArrowRight', '+', 'PageDown', 'k'].includes(e.key)) { shift(+1); e.preventDefault(); }
+  if (['ArrowDown', 'ArrowLeft', '-', 'PageUp', 'j'].includes(e.key)) { shift(-1); e.preventDefault(); }
+});
+let wake = null;
+async function keepAwake() { try { if (!wake && navigator.wakeLock) wake = await navigator.wakeLock.request('screen'); } catch {} }
+
+render(); updateDots();
+setInterval(tick, DT * 1000);
+</script>
+</body>
+</html>
