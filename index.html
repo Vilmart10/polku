@@ -134,7 +134,7 @@
 
 <script>
 'use strict';
-const VERSION = 'v0.18';
+const VERSION = 'v0.19';
 document.getElementById('ver').textContent = VERSION;
 document.title = 'Polku ' + VERSION;
 // ---------- UUIDs (Bluetooth SIG) ----------
@@ -356,12 +356,19 @@ function shift(d) {
 const DT = 0.25;
 function tick() {
   if (S.demo) {
+    // Demo rider: effort set by the hill (≈190 W on the flat, more uphill, less downhill),
+    // cadence follows from speed and the chosen gear – like a real rider who cannot spin any gear at 90 rpm.
     const t = performance.now() / 1000;
-    S.cad = Math.max(0, 86 + 6 * Math.sin(t / 7) + (Math.random() - .5) * 3);
-    const goal = S.mode !== 'sim' ? (S.target ?? 150) : 180 + 20 * Math.sin(t / 11);
-    S.power = Math.max(0, S.power + (goal - S.power) * 0.35 + (Math.random() - .5) * 6);
-    if (!hrDevice) S.hr = Math.round(120 + S.power / 10);
+    const effort = Math.max(60, Math.min(300, 190 + 12 * S.grade + 15 * Math.sin(t / 11)));
+    const ratio = S.mode === 'sim' ? realRatio() : RATIOS[S.gear];
+    const cadFromSpeed = S.speed / (ratio * WHEEL) * 60;
+    S.cad = Math.max(0, Math.min(115, cadFromSpeed + (Math.random() - .5) * 2));
+    const goal = S.cad < 35 && S.speed > 1 ? effort * 0.7 : effort;       // grinding a too-big gear
+    S.power = Math.max(0, S.power + (goal - S.power) * 0.2 + (Math.random() - .5) * 6);
+    if (S.speed < 0.5 && S.cad < 1) S.cad = 60;                              // pushing off from standstill
+    if (!hrDevice) S.hr = Math.round((S.hr || 100) + ((95 + S.power * 0.3) - (S.hr || 100)) * 0.02);
   }
+
   S.cadEma = S.cadEma ? S.cadEma + 0.3 * (S.cad - S.cadEma) : S.cad;
   S.target = S.mode === 'sim' ? null : computeTarget();
   adaptK();
