@@ -108,7 +108,7 @@
 
 <script>
 'use strict';
-const VERSION = 'v0.13';
+const VERSION = 'v0.14';
 document.getElementById('ver').textContent = VERSION;
 document.title = 'Polku ' + VERSION;
 // ---------- UUIDs (Bluetooth SIG) ----------
@@ -760,6 +760,7 @@ function buildFit(samples) {
 const ZW_SVC = '00000001-19ca-4651-86e5-fa29dcdd09d1';
 const ZW_ASYNC = '00000002-19ca-4651-86e5-fa29dcdd09d1', ZW_RX = '00000003-19ca-4651-86e5-fa29dcdd09d1',
       ZW_TX = '00000004-19ca-4651-86e5-fa29dcdd09d1', ZW_6 = '00000006-19ca-4651-86e5-fa29dcdd09d1';
+const ZW_5 = '00000005-19ca-4651-86e5-fa29dcdd09d1';
 const ZW_FC82 = '0000fc82-0000-1000-8000-00805f9b34fb';
 const RIDE_ON = [0x52, 0x69, 0x64, 0x65, 0x4f, 0x6e];
 // Bluefy rejects some requestDevice options instantly, so try several ways.
@@ -793,7 +794,16 @@ async function pickClick() {
   throw new Error('mikään tapa ei avannut laitevalintaa');
 }
 let click = null, clickState = { plus: false, minus: false }, clickRawLeft = 40;
-const hex = dv => [...new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength)].map(b => b.toString(16).padStart(2, '0')).join(' ');
+// Bluefy's DataView may lack byteOffset/byteLength, so read byte by byte.
+function bytesOf(dv) {
+  if (dv instanceof Uint8Array) return dv;
+  let n = dv.byteLength;
+  if (n === undefined && dv.buffer) n = dv.buffer.byteLength - (dv.byteOffset || 0);
+  const out = new Uint8Array(n || 0);
+  for (let i = 0; i < out.length; i++) out[i] = dv.getUint8(i);
+  return out;
+}
+const hex = dv => [...bytesOf(dv)].map(b => b.toString(16).padStart(2, '0')).join(' ') || '(tyhjä)';
 const shortId = u => u.length > 8 ? u.slice(4, 8) : u;
 
 function pbDecode(bytes) {                 // minimal protobuf: varint fields only
@@ -808,7 +818,7 @@ function pbDecode(bytes) {                 // minimal protobuf: varint fields on
   return out;
 }
 function onClickData(name, dv) {
-  const b = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+  const b = bytesOf(dv);
   const type = b[0];
   if (type === 0x37) {                         // Click button status: field 1 = plus, field 2 = minus, 0 = pressed
     const m = pbDecode(b.subarray(1));
@@ -841,8 +851,8 @@ async function connectClick() {
       try { chars = await s.getCharacteristics(); } catch {}
       log(`Palvelu ${s.uuid}: ` + chars.map(c => shortId(c.uuid) + '[' + ['read','write','writeWithoutResponse','notify','indicate'].filter(p => c.properties[p]).join(',') + ']').join(' '));
     }
-    const svc = svcs.find(s => s.uuid === ZW_SVC) || await server.getPrimaryService(ZW_SVC);
-    for (const [id, name] of [[ZW_ASYNC, 'async'], [ZW_TX, 'syncTX'], [ZW_6, 'ch6']]) {
+    const svc = svcs.find(s => s.uuid.toLowerCase() === ZW_SVC) || await server.getPrimaryService(ZW_SVC);
+    for (const [id, name] of [[ZW_ASYNC, 'async'], [ZW_TX, 'syncTX'], [ZW_5, 'ch5'], [ZW_6, 'ch6']]) {
       try {
         const ch = await svc.getCharacteristic(id);
         ch.addEventListener('characteristicvaluechanged', e => onClickData(name, e.target.value));
@@ -856,7 +866,9 @@ async function connectClick() {
     step = 'RideOn';
     const rx = await svc.getCharacteristic(ZW_RX);
     const buf = new Uint8Array(RIDE_ON);
-    await (rx.writeValueWithResponse ? rx.writeValueWithResponse(buf) : rx.writeValue(buf));
+    // 0003 accepts write-without-response only
+    if (rx.writeValueWithoutResponse) await rx.writeValueWithoutResponse(buf);
+    else await rx.writeValue(buf);
     log('RideOn lähetetty – paina Clickin + ja − nappeja');
     $('dotClick').classList.add('ok');
   } catch (e) { log(`Click-virhe (${step}): ${errText(e)}`); setStatus('Click: ' + errText(e)); }
