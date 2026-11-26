@@ -18,16 +18,20 @@
   button.on { border-color:var(--ok); color:var(--ok); }
   .dot { width:9px; height:9px; border-radius:50%; background:var(--bad); display:inline-block; margin-right:6px; }
   .dot.ok { background:var(--ok); }
-  .grid { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; flex:1; align-content:start; }
-  .tile { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:12px 14px; }
+  .grid { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; flex:1; align-content:start; }
+  .tile { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:8px 14px; }
   .tile .k { font-size:12px; color:var(--dim); text-transform:uppercase; letter-spacing:.08em; }
-  .tile .v { font-size:clamp(30px,6vw,64px); font-weight:600; font-variant-numeric:tabular-nums; line-height:1.1; }
+  .tile .v { font-size:clamp(28px,5vw,56px); font-weight:600; font-variant-numeric:tabular-nums; line-height:1.1; }
   .tile .u { font-size:14px; color:var(--dim); margin-left:4px; }
   .tile.big { grid-column:span 2; }
-  .tile.big .v { font-size:clamp(48px,11vw,120px); }
+  .tile.big .v { font-size:clamp(44px,8.5vw,100px); }
   .gear .v { color:var(--acc); }
+  .route { display:grid; grid-template-columns:1fr 2fr; gap:10px; margin-top:10px; }
+  .route canvas { width:100%; height:140px; background:var(--panel); border:1px solid var(--line); border-radius:14px; display:block; }
+  .routebar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:10px; color:var(--dim); font-size:14px; }
+  button:disabled { opacity:.35; }
   .shift { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:10px 0; }
-  .shift button { font-size:34px; padding:26px 0; border-radius:16px; }
+  .shift button { font-size:30px; padding:18px 0; border-radius:16px; }
   .settings { display:flex; gap:14px; flex-wrap:wrap; align-items:center; padding:6px 0 10px; color:var(--dim); font-size:14px; }
   .settings label { display:flex; gap:6px; align-items:center; }
   .settings input[type=number] { width:76px; padding:6px 8px; }
@@ -60,6 +64,18 @@
   <div class="tile"><div class="k">Kaltevuus</div><div class="v"><span id="vGrade">0.0</span><span class="u">%</span></div></div>
 </div>
 
+<div class="routebar">
+  <label>Reitti <select id="selRoute"><option value="">Ei reittiä (käsisäätö)</option></select></label>
+  <button id="btnAddFit">Lisää FIT-reitti</button>
+  <button id="btnDelRoute">Poista reitti</button>
+  <input type="file" id="inFit" style="display:none">
+  <span id="routeInfo"></span>
+</div>
+<div class="route" id="routePanel" style="display:none">
+  <canvas id="cvMap"></canvas>
+  <canvas id="cvProfile"></canvas>
+</div>
+
 <div class="shift">
   <button id="btnDown">− Kevyempi</button>
   <button id="btnUp">+ Raskaampi</button>
@@ -88,7 +104,7 @@
 
 <script>
 'use strict';
-const VERSION = 'v0.6';
+const VERSION = 'v0.7';
 document.getElementById('ver').textContent = VERSION;
 document.title = 'Polku ' + VERSION;
 // ---------- UUIDs (Bluetooth SIG) ----------
@@ -243,13 +259,18 @@ function computeTarget() {
 // Trainer applies F = M_T·g·(crr + grade) + Cw·v², v = its own (real-gear) wheel speed.
 // Virtual gear q = r_virtual / r_real  →  wanted F_real(v) = q·A + q³·B·v²
 // (A = rolling+gravity force, B = ½ρCdA). S.k adapts slowly so measured ≈ modelled power.
+const CW_CAP = 1.0;
 const M_T = 75; // assumed rider mass inside the trainer's own model (unknown, k absorbs error)
 const realRatio = () => S.front / S.cog;
 function vsimParams() {
   const q = RATIOS[S.gear] / realRatio(), th = Math.atan(S.grade * S.diff / 100);
   const A = S.mass * P.g * (P.crr * Math.cos(th) + Math.sin(th)), B = 0.5 * P.rho * P.cda;
-  const gradeT = Math.max(-15, Math.min(20, (q * A / (M_T * P.g) - P.crr) * 100));
-  const cw = Math.max(0, Math.min(2.55, S.k * q ** 3 * B));
+  // Test rides showed the Hub follows large Cw values only partly → cap Cw and
+  // deliver the rest of the air-drag force through grade at the current wheel speed.
+  const cwWanted = S.k * q ** 3 * B, cw = Math.min(CW_CAP, cwWanted);
+  const vReal = Math.max(3, S.cadEma / 60 * realRatio() * WHEEL);
+  const extraF = (cwWanted - cw) * vReal * vReal;
+  const gradeT = Math.max(-15, Math.min(20, ((q * A + extraF) / (M_T * P.g) - P.crr) * 100));
   return { gradeT: Math.round(gradeT * 100) / 100, cw: Math.round(cw * 100) / 100, q, A, B };
 }
 function adaptK() {
@@ -257,7 +278,6 @@ function adaptK() {
   if (Math.abs(S.cad - S.cadEma) > 4) S.steadySince = now;          // cadence not steady
   if (S.mode !== 'vsim' || S.cadEma < 60 || S.power < 60 || Math.abs(S.grade) > 0.5) return;
   if (now - S.shiftedAt < 10000 || now - S.gradeChangedAt < 10000 || now - S.steadySince < 5000) return;
-  if (S.k * (RATIOS[S.gear] / realRatio()) ** 3 * 0.5 * P.rho * P.cda >= 2.5) return; // Cw saturated
   const vReal = S.cadEma / 60 * realRatio() * WHEEL;
   const { q, A, B } = vsimParams();
   const pred = (q * A + q ** 3 * B * vReal * vReal) * vReal;  // power the model asks for
@@ -275,7 +295,7 @@ async function pushTarget(force = false) {
   if (S.mode === 'vsim') {
     const p = vsimParams(), l = S.lastSim;
     const changed = !l || Math.abs(p.gradeT - l.gradeT) >= 0.1 || Math.abs(p.cw - l.cw) >= Math.max(0.01, l.cw * 0.03);
-    if (!(force || (changed && now - S.lastSentAt > 3000))) return;
+    if (!(force || (changed && now - S.lastSentAt > 2000))) return;
     if (await cmdSim(p.gradeT, p.cw)) { S.lastSim = p; S.lastSentAt = performance.now(); }
     return;
   }
@@ -315,7 +335,9 @@ function tick() {
   S.speed = Math.max(0, v + (prop - resistForce(v, S.grade)) / (S.mass + 1) * DT);
   if (S.speed < 0.05 && S.power < 1) S.speed = 0;
 
-  if (S.running) {
+  if (S.route) updateRouteGrade();
+  const moving = S.power > 0 || S.cad > 0 || S.speed > 0.5;
+  if (S.running && moving) {
     S.elapsed += DT; S.dist += S.speed * DT; S.energy += S.power * DT;
     if (Math.floor(S.elapsed) !== Math.floor(S.elapsed - DT))
     {
@@ -346,7 +368,8 @@ function render() {
   $('vRatio').textContent = S.mode !== 'sim' ? RATIOS[S.gear].toFixed(2) : '';
   $('vTarget').textContent = S.target ?? '–';
   $('vTime').textContent = fmtTime(S.elapsed);
-  $('vDist').textContent = (S.dist / 1000).toFixed(2);
+  $('vDist').textContent = S.route ? (S.dist / 1000).toFixed(1) + '/' + (S.route.len / 1000).toFixed(0) : (S.dist / 1000).toFixed(2);
+  drawRoute();
   $('vAvg').textContent = S.elapsed > 0 ? Math.round(S.energy / S.elapsed) : '–';
   $('vGrade').textContent = S.grade.toFixed(1);
 }
@@ -402,7 +425,9 @@ $('btnClear').onclick = () => {
   render();
 };
 try { const old = JSON.parse(localStorage.getItem('polku_samples') || '[]');
-  if (old.length) { S.samples = old; log(`Palautettiin ${old.length} riviä edellisestä istunnosta`); } } catch {}
+  const last = old.length && Date.parse(old[old.length - 1].t);
+  if (last && Date.now() - last < 15 * 60 * 1000) { S.samples = old; log(`Palautettiin ${old.length} riviä keskeytyneestä ajosta`); }
+  else localStorage.removeItem('polku_samples'); } catch {}
 document.addEventListener('keydown', e => {
   // Arrow keys, +/- and PageUp/PageDown (Bluetooth page turners / remotes)
   if (['ArrowUp', 'ArrowRight', '+', 'PageDown', 'k'].includes(e.key)) { shift(+1); e.preventDefault(); }
@@ -410,6 +435,193 @@ document.addEventListener('keydown', e => {
 });
 let wake = null;
 async function keepAwake() { try { if (!wake && navigator.wakeLock) wake = await navigator.wakeLock.request('screen'); } catch {} }
+
+// ================= Routes from FIT files =================
+// Minimal FIT decoder: reads 'record' messages (global 20): lat/long, altitude, distance.
+function parseFit(buf) {
+  const dv = new DataView(buf);
+  const hs = dv.getUint8(0), dataSize = dv.getUint32(4, true);
+  if (String.fromCharCode(dv.getUint8(8), dv.getUint8(9), dv.getUint8(10), dv.getUint8(11)) !== '.FIT') throw new Error('Ei FIT-tiedosto');
+  const end = Math.min(hs + dataSize, buf.byteLength), defs = {}, pts = [];
+  let o = hs;
+  const rd = (off, size, base, le) => {
+    switch (size) {
+      case 1: return dv.getUint8(off);
+      case 2: return dv.getUint16(off, le);
+      case 4: return (base === 0x85) ? dv.getInt32(off, le) : dv.getUint32(off, le);
+      default: return null;
+    }
+  };
+  while (o < end) {
+    const h = dv.getUint8(o++);
+    let local, isDef = false;
+    if (h & 0x80) local = (h >> 5) & 3;                 // compressed timestamp header
+    else { local = h & 0x0f; isDef = !!(h & 0x40); }
+    if (isDef) {
+      const hasDev = h & 0x20;
+      o++;                                              // reserved
+      const le = dv.getUint8(o++) === 0;
+      const gnum = dv.getUint16(o, le); o += 2;
+      const n = dv.getUint8(o++), fields = []; let size = 0;
+      for (let i = 0; i < n; i++, o += 3) { const f = { num: dv.getUint8(o), size: dv.getUint8(o + 1), base: dv.getUint8(o + 2), off: size }; size += f.size; fields.push(f); }
+      if (hasDev) { const nd = dv.getUint8(o++); for (let i = 0; i < nd; i++, o += 3) size += dv.getUint8(o + 1); }
+      defs[local] = { gnum, le, fields, size };
+      continue;
+    }
+    const d = defs[local];
+    if (!d) throw new Error('FIT: tuntematon viestityyppi');
+    if (d.gnum === 20) {
+      const r = {};
+      for (const f of d.fields) {
+        if (![0, 1, 2, 5, 78].includes(f.num)) continue;
+        const v = rd(o + f.off, f.size, f.base, d.le);
+        if (v === null) continue;
+        if ((f.num === 0 || f.num === 1) && v !== 0x7fffffff) r[f.num === 0 ? 'lat' : 'lon'] = v * 180 / 2147483648;
+        if (f.num === 2 && v !== 0xffff) r.alt ??= v / 5 - 500;
+        if (f.num === 78 && v !== 0xffffffff) r.alt = v / 5 - 500;
+        if (f.num === 5 && v !== 0xffffffff) r.dist = v / 100;
+      }
+      if (r.lat !== undefined && r.lon !== undefined && r.alt !== undefined) pts.push(r);
+    }
+    o += d.size;
+  }
+  return pts;
+}
+
+const hav = (a, b) => { const R = 6371000, toR = Math.PI / 180;
+  const dLat = (b.lat - a.lat) * toR, dLon = (b.lon - a.lon) * toR;
+  const x = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * toR) * Math.cos(b.lat * toR) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(x)); };
+
+// Resample to fixed 10 m steps, smooth altitude, compute grade.
+function buildRoute(name, pts) {
+  if (pts.length < 10) throw new Error('Tiedostossa ei ole GPS-reittiä');
+  let d = 0; pts[0].d = 0;
+  for (let i = 1; i < pts.length; i++) { d += hav(pts[i - 1], pts[i]); pts[i].d = d; }
+  const STEP = 10, n = Math.floor(d / STEP) + 1, lat = [], lon = [], alt = [];
+  let j = 0;
+  for (let i = 0; i < n; i++) {
+    const x = i * STEP;
+    while (j < pts.length - 2 && pts[j + 1].d < x) j++;
+    const a = pts[j], b = pts[j + 1], t = b.d > a.d ? Math.min(1, Math.max(0, (x - a.d) / (b.d - a.d))) : 0;
+    lat.push(a.lat + (b.lat - a.lat) * t); lon.push(a.lon + (b.lon - a.lon) * t); alt.push(a.alt + (b.alt - a.alt) * t);
+  }
+  const smooth = (arr, w) => arr.map((_, i) => { let s = 0, c = 0;
+    for (let k = Math.max(0, i - w); k <= Math.min(arr.length - 1, i + w); k++) { s += arr[k]; c++; } return s / c; });
+  const altS = smooth(alt, 5);                        // ±50 m
+  const grade = altS.map((_, i) => { const a = Math.max(0, i - 3), b = Math.min(n - 1, i + 3);
+    return b > a ? Math.max(-15, Math.min(15, (altS[b] - altS[a]) / ((b - a) * STEP) * 100)) : 0; });
+  const g2 = smooth(grade, 2);
+  let asc = 0; for (let i = 1; i < n; i++) asc += Math.max(0, altS[i] - altS[i - 1]);
+  const r5 = v => Math.round(v * 1e5) / 1e5, r1 = v => Math.round(v * 10) / 10;
+  return { name, len: (n - 1) * STEP, step: STEP, asc: Math.round(asc),
+    lat: lat.map(r5), lon: lon.map(r5), alt: altS.map(r1), grade: g2.map(r1) };
+}
+
+// ---------- Storage ----------
+const loadRoutes = () => { try { return JSON.parse(localStorage.getItem('polku_routes') || '[]'); } catch { return []; } };
+function saveRoutes(list) { try { localStorage.setItem('polku_routes', JSON.stringify(list)); return true; }
+  catch (e) { alert('Reittiä ei voitu tallentaa selaimen muistiin: ' + errText(e)); return false; } }
+function fillRouteSelect(selectName) {
+  const sel = $('selRoute'); sel.length = 1;
+  for (const r of loadRoutes()) { const o = document.createElement('option'); o.value = r.name;
+    o.textContent = `${r.name} (${(r.len / 1000).toFixed(1)} km, ↑${r.asc} m)`; sel.appendChild(o); }
+  if (selectName !== undefined) sel.value = selectName;
+}
+function selectRoute(name) {
+  S.route = loadRoutes().find(r => r.name === name) || null;
+  $('routePanel').style.display = S.route ? '' : 'none';
+  for (const id of ['btnGradeDown', 'btnGradeUp', 'inGrade']) $(id).disabled = !!S.route;
+  $('btnDelRoute').disabled = !S.route;
+  $('routeInfo').textContent = S.route ? '' : '';
+  mapCache = null;
+  if (!S.route) { S.grade = +$('inGrade').value; }
+  updateRouteGrade(); pushTarget(true); render();
+}
+$('selRoute').onchange = e => selectRoute(e.target.value);
+$('btnAddFit').onclick = () => $('inFit').click();
+$('inFit').onchange = async e => {
+  const file = e.target.files[0]; e.target.value = '';
+  if (!file) return;
+  try {
+    const pts = parseFit(await file.arrayBuffer());
+    let name = (prompt('Reitin nimi', file.name.replace(/\.fit$/i, '').replace(/_/g, ' ')) || '').trim();
+    if (!name) return;
+    const route = buildRoute(name, pts), list = loadRoutes().filter(r => r.name !== name);
+    list.push(route);
+    if (!saveRoutes(list)) return;
+    fillRouteSelect(name); selectRoute(name);
+    log(`Reitti "${name}": ${(route.len / 1000).toFixed(1)} km, nousua ${route.asc} m, ${pts.length} GPS-pistettä`);
+  } catch (err) { alert('FIT-tiedoston luku epäonnistui: ' + errText(err)); log('FIT: ' + errText(err)); }
+};
+$('btnDelRoute').onclick = () => {
+  if (!S.route || !confirm(`Poistetaanko reitti "${S.route.name}"?`)) return;
+  saveRoutes(loadRoutes().filter(r => r.name !== S.route.name)); fillRouteSelect(''); selectRoute('');
+};
+
+// ---------- Position on route ----------
+function routeIndex() { const r = S.route; return Math.min(r.lat.length - 1, Math.max(0, S.dist / r.step)); }
+const interp = (arr, x) => { const i = Math.floor(x), t = x - i; return i + 1 < arr.length ? arr[i] + (arr[i + 1] - arr[i]) * t : arr[arr.length - 1]; };
+function updateRouteGrade() {
+  if (!S.route) return;
+  const done = S.dist >= S.route.len;
+  const g = done ? 0 : Math.round(interp(S.route.grade, routeIndex()) * 10) / 10;
+  if (g !== S.grade) { S.grade = g; S.gradeChangedAt = performance.now(); }
+  if (done && !S.routeDone) { S.routeDone = true; setStatus('Reitti ajettu! 🎉'); }
+  if (!done) S.routeDone = false;
+}
+
+// ---------- Drawing ----------
+let mapCache = null, lastDraw = 0;
+function setupCanvas(cv) {
+  const dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); mapCache = null; }
+  const ctx = cv.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); return { ctx, w, h };
+}
+function drawRoute() {
+  if (!S.route) return;
+  const now = performance.now(); if (now - lastDraw < 450) return; lastDraw = now;
+  const r = S.route, n = r.lat.length, x = routeIndex(), k = Math.floor(x);
+  const css = getComputedStyle(document.documentElement);
+  const C = { line: '#3a3e45', acc: css.getPropertyValue('--acc').trim(), dim: css.getPropertyValue('--dim').trim(), fg: css.getPropertyValue('--fg').trim() };
+
+  // Map
+  { const { ctx, w, h } = setupCanvas($('cvMap'));
+    if (!mapCache) {
+      let minX = 1e9, maxX = -1e9, minY = 1e9, maxY = -1e9; const cl = Math.cos(r.lat[0] * Math.PI / 180);
+      for (let i = 0; i < n; i++) { const X = r.lon[i] * cl, Y = r.lat[i]; minX = Math.min(minX, X); maxX = Math.max(maxX, X); minY = Math.min(minY, Y); maxY = Math.max(maxY, Y); }
+      const pad = 14, sc = Math.min((w - 2 * pad) / (maxX - minX || 1), (h - 2 * pad) / (maxY - minY || 1));
+      const ox = (w - (maxX - minX) * sc) / 2, oy = (h - (maxY - minY) * sc) / 2;
+      mapCache = i => [ox + (r.lon[i] * cl - minX) * sc, h - oy - (r.lat[i] - minY) * sc];
+    }
+    const P_ = mapCache; ctx.clearRect(0, 0, w, h); ctx.lineWidth = 2.5; ctx.lineJoin = 'round';
+    const stroke = (a, b, col) => { ctx.beginPath(); for (let i = a; i <= b; i += 2) { const [X, Y] = P_(i); i === a ? ctx.moveTo(X, Y) : ctx.lineTo(X, Y); } ctx.strokeStyle = col; ctx.stroke(); };
+    stroke(0, n - 1, C.line); if (k > 0) stroke(0, k, C.acc);
+    const [sx, sy] = P_(0); ctx.fillStyle = C.dim; ctx.beginPath(); ctx.arc(sx, sy, 3, 0, 7); ctx.fill();
+    const pa = P_(k), pb = P_(Math.min(n - 1, k + 1)), t = x - k;
+    ctx.fillStyle = C.fg; ctx.beginPath(); ctx.arc(pa[0] + (pb[0] - pa[0]) * t, pa[1] + (pb[1] - pa[1]) * t, 6, 0, 7); ctx.fill();
+    ctx.strokeStyle = C.acc; ctx.lineWidth = 2; ctx.stroke();
+  }
+  // Elevation profile
+  { const { ctx, w, h } = setupCanvas($('cvProfile'));
+    let lo = Math.min(...r.alt), hi = Math.max(...r.alt); if (hi - lo < 20) { const m = (hi + lo) / 2; lo = m - 10; hi = m + 10; }
+    const L = 36, R = 10, T = 12, B = 20, X = i => L + i / (n - 1) * (w - L - R), Y = a => T + (hi - a) / (hi - lo) * (h - T - B);
+    ctx.clearRect(0, 0, w, h);
+    const area = (a, b, col) => { ctx.beginPath(); ctx.moveTo(X(a), h - B); for (let i = a; i <= b; i += 2) ctx.lineTo(X(i), Y(r.alt[i])); ctx.lineTo(X(b), Y(r.alt[b])); ctx.lineTo(X(b), h - B); ctx.closePath(); ctx.fillStyle = col; ctx.fill(); };
+    area(0, n - 1, '#2a2d32'); if (k > 0) area(0, k, C.acc + '66');
+    ctx.fillStyle = C.dim; ctx.font = '11px -apple-system, sans-serif';
+    ctx.fillText(Math.round(hi) + ' m', 2, T + 4); ctx.fillText(Math.round(lo) + ' m', 2, h - B);
+    ctx.fillText('0', L, h - 5); const tl = (r.len / 1000).toFixed(1) + ' km'; ctx.fillText(tl, w - R - ctx.measureText(tl).width, h - 5);
+    const ax = X(x), ay = Y(interp(r.alt, x));
+    ctx.strokeStyle = C.acc; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(ax, T); ctx.lineTo(ax, h - B); ctx.stroke();
+    ctx.fillStyle = C.fg; ctx.beginPath(); ctx.arc(ax, ay, 6, 0, 7); ctx.fill(); ctx.strokeStyle = C.acc; ctx.lineWidth = 2; ctx.stroke();
+    const lbl = `${(S.dist / 1000).toFixed(2)} km · ${interp(r.alt, x).toFixed(0)} m · ${S.grade.toFixed(1)} %`;
+    ctx.fillStyle = C.fg; ctx.fillText(lbl, Math.min(Math.max(L, ax - ctx.measureText(lbl).width / 2), w - R - ctx.measureText(lbl).width), T + 4);
+  }
+}
+window.addEventListener('resize', () => { mapCache = null; lastDraw = 0; });
+fillRouteSelect('');
+$('btnDelRoute').disabled = true;
 
 render(); updateDots();
 setInterval(tick, DT * 1000);
