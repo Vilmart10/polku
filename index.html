@@ -18,7 +18,7 @@
   button.on { border-color:var(--ok); color:var(--ok); }
   .dot { width:9px; height:9px; border-radius:50%; background:var(--bad); display:inline-block; margin-right:6px; }
   .dot.ok { background:var(--ok); }
-  .grid { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; flex:1; align-content:start; }
+  .grid { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; align-content:start; }
   .tile { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:8px 14px; }
   .tile .k { font-size:12px; color:var(--dim); text-transform:uppercase; letter-spacing:.08em; }
   .tile .v { font-size:clamp(28px,5vw,56px); font-weight:600; font-variant-numeric:tabular-nums; line-height:1.1; }
@@ -29,8 +29,9 @@
   #cvZoom { flex:1; min-width:0; height:64px; display:block; }
   .tile.big .v { font-size:clamp(44px,8.5vw,100px); }
   .gear .v { color:var(--acc); }
-  .route { display:grid; grid-template-columns:1fr 2fr; gap:10px; margin-top:10px; }
-  .route canvas { width:100%; height:140px; background:var(--panel); border:1px solid var(--line); border-radius:14px; display:block; }
+  .route { display:grid; grid-template-columns:1fr 2fr; gap:10px; margin-top:10px; flex:1 1 0; min-height:140px; }
+  .cvWrap { position:relative; min-height:140px; }
+  .route canvas { position:absolute; inset:0; width:100%; height:100%; background:var(--panel); border:1px solid var(--line); border-radius:14px; display:block; }
   .routebar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:10px; color:var(--dim); font-size:14px; }
   button:disabled { opacity:.35; }
   .shift { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:10px 0; }
@@ -39,6 +40,15 @@
   .settings label { display:flex; gap:6px; align-items:center; }
   .settings input[type=number] { width:76px; padding:6px 8px; }
   .settings input[type=range] { width:180px; }
+  .menuBack { display:none; position:fixed; inset:0; background:#0008; z-index:10; }
+  .menu { display:none; position:fixed; left:0; right:0; bottom:0; max-height:78vh; overflow:auto; z-index:11;
+    background:var(--bg); border-top:1px solid var(--line); border-radius:18px 18px 0 0;
+    padding:14px 18px calc(18px + env(safe-area-inset-bottom)); box-shadow:0 -10px 30px #0008; }
+  body.menuOpen .menu, body.menuOpen .menuBack { display:block; }
+  .menuHead { display:flex; justify-content:space-between; align-items:center; }
+  .menu h3 { font-size:12px; color:var(--dim); text-transform:uppercase; letter-spacing:.08em; margin:14px 0 4px; font-weight:500; }
+  .menu pre { max-height:30vh; color:var(--dim); font-size:12px; }
+  #cvMap { cursor:pointer; }
   details { color:var(--dim); font-size:12px; margin-bottom:8px; }
   pre { max-height:140px; overflow:auto; background:var(--panel); padding:8px; border-radius:8px; white-space:pre-wrap; }
   @media (max-width:700px){ .grid{grid-template-columns:repeat(2,1fr);} }
@@ -53,6 +63,7 @@
   <button id="btnDemo">Demo</button>
   <button id="btnRun">▶ Aloita</button>
   <button id="btnFull" title="Koko ruutu">⛶</button>
+  <button id="btnMenu">☰ Valikko</button>
   <span id="status" style="color:var(--dim);font-size:13px"></span>
 </header>
 
@@ -77,8 +88,8 @@
   <span id="routeInfo"></span>
 </div>
 <div class="route" id="routePanel" style="display:none">
-  <canvas id="cvMap"></canvas>
-  <canvas id="cvProfile"></canvas>
+  <div class="cvWrap"><canvas id="cvMap"></canvas></div>
+  <div class="cvWrap"><canvas id="cvProfile"></canvas></div>
 </div>
 
 <div class="shift">
@@ -86,6 +97,10 @@
   <button id="btnUp">+ Raskaampi</button>
 </div>
 
+<div id="menuBack" class="menuBack"></div>
+<div id="menu" class="menu">
+<div class="menuHead"><b>Valikko</b><button id="btnMenuClose">✕ Sulje</button></div>
+<h3>Ajo</h3>
 <div class="settings">
   <label>Tila
     <select id="selMode">
@@ -100,17 +115,26 @@
   <label>Kaltevuus <button id="btnGradeDown" style="padding:6px 14px">−</button>
     <input type="range" id="inGrade" min="-8" max="15" step="0.5" value="0">
     <button id="btnGradeUp" style="padding:6px 14px">+</button></label>
+</div>
+<h3>Tallennus</h3>
+<div class="settings">
   <button id="btnFit" style="border-color:var(--acc);color:var(--acc)">Tallenna FIT (Strava)</button>
   <button id="btnSave">Tallenna CSV</button>
   <button id="btnCopy">Kopioi CSV</button>
   <button id="btnClear">Tyhjennä</button>
 </div>
 
-<details><summary>Loki</summary><pre id="log"></pre></details>
+<h3>Loki</h3>
+<div class="settings">
+  <button id="btnLogCopy">Kopioi loki</button>
+  <button id="btnLogSave">Tallenna loki</button>
+</div>
+<pre id="log"></pre>
+</div>
 
 <script>
 'use strict';
-const VERSION = 'v0.17';
+const VERSION = 'v0.18';
 document.getElementById('ver').textContent = VERSION;
 document.title = 'Polku ' + VERSION;
 // ---------- UUIDs (Bluetooth SIG) ----------
@@ -134,7 +158,12 @@ const S = {
   demo: false, connected: false, pwrMin: 0, pwrMax: 1500,
 };
 const $ = id => document.getElementById(id);
-const log = m => { const el = $('log'); el.textContent = `${new Date().toLocaleTimeString()} ${m}\n` + el.textContent.slice(0, 5000); };
+const LOG = [];
+const log = m => {
+  const line = `${new Date().toLocaleTimeString()} ${m}`;
+  LOG.push(line); if (LOG.length > 5000) LOG.splice(0, LOG.length - 5000);
+  const el = $('log'); el.textContent = line + '\n' + el.textContent.slice(0, 6000);
+};
 const setStatus = m => { $('status').textContent = m; };
 
 // ---------- FTMS control point (one command at a time) ----------
@@ -587,6 +616,7 @@ function selectRoute(name) {
   updateRouteGrade(); pushTarget(true); render();
 }
 $('selRoute').onchange = e => selectRoute(e.target.value);
+$('cvMap').onclick = () => { S.mapZoom = !S.mapZoom; lastDraw = 0; drawRoute(); };
 try { S.loop = localStorage.getItem('polku_loop') === '1'; $('chkLoop').checked = S.loop; } catch {}
 $('chkLoop').onchange = e => { S.loop = e.target.checked; S.lap = 0; try { localStorage.setItem('polku_loop', S.loop ? '1' : '0'); } catch {} updateRouteGrade(); lastDraw = 0; render(); };
 $('btnAddFit').onclick = () => $('inFit').click();
@@ -649,9 +679,22 @@ function drawRoute() {
       const ox = (w - (maxX - minX) * sc) / 2, oy = (h - (maxY - minY) * sc) / 2;
       mapCache = i => [ox + (r.lon[i] * cl - minX) * sc, h - oy - (r.lat[i] - minY) * sc];
     }
-    const P_ = mapCache; ctx.clearRect(0, 0, w, h); ctx.lineWidth = 2.5; ctx.lineJoin = 'round';
-    const stroke = (a, b, col) => { ctx.beginPath(); for (let i = a; i <= b; i += 2) { const [X, Y] = P_(i); i === a ? ctx.moveTo(X, Y) : ctx.lineTo(X, Y); } ctx.strokeStyle = col; ctx.stroke(); };
-    stroke(0, n - 1, C.line); if (k > 0) stroke(0, k, C.acc);
+    let P_ = mapCache;
+    if (S.mapZoom) {                      // ~1 km across the shorter side, centred on the rider
+      const t0 = x - k, lat0 = r.lat[k] + ((r.lat[Math.min(n - 1, k + 1)] - r.lat[k]) * t0), lon0 = r.lon[k] + ((r.lon[Math.min(n - 1, k + 1)] - r.lon[k]) * t0);
+      const cl = Math.cos(lat0 * Math.PI / 180), sc = Math.min(w, h) / 1000;
+      P_ = i => [w / 2 + (r.lon[i] - lon0) * cl * 111320 * sc, h / 2 - (r.lat[i] - lat0) * 110540 * sc];
+    }
+    ctx.clearRect(0, 0, w, h); ctx.lineWidth = S.mapZoom ? 4 : 2.5; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    const stride = S.mapZoom ? 1 : 2;
+    const stroke = (a, b, col) => { ctx.beginPath(); for (let i = a; i <= b; i += stride) { const [X, Y] = P_(i); i === a ? ctx.moveTo(X, Y) : ctx.lineTo(X, Y); } ctx.strokeStyle = col; ctx.stroke(); };
+    if (S.mapZoom) {                      // route coloured by grade, ridden part on top
+      const a0 = Math.max(0, k - 150), b0 = Math.min(n - 1, k + 150);
+      for (let i = a0; i < b0; i++) { const [X1, Y1] = P_(i), [X2, Y2] = P_(i + 1);
+        ctx.beginPath(); ctx.moveTo(X1, Y1); ctx.lineTo(X2, Y2); ctx.strokeStyle = i < k ? '#55595f' : gradeColor(r.grade[i]); ctx.stroke(); }
+    } else { stroke(0, n - 1, C.line); if (k > 0) stroke(0, k, C.acc); }
+    ctx.fillStyle = C.dim; ctx.font = '10px -apple-system, sans-serif';
+    ctx.fillText(S.mapZoom ? '1 km · napauta: koko reitti' : 'napauta: zoomaa', 8, h - 7);
     const [sx, sy] = P_(0); ctx.fillStyle = C.dim; ctx.beginPath(); ctx.arc(sx, sy, 3, 0, 7); ctx.fill();
     const pa = P_(k), pb = P_(Math.min(n - 1, k + 1)), t = x - k;
     ctx.fillStyle = C.fg; ctx.beginPath(); ctx.arc(pa[0] + (pb[0] - pa[0]) * t, pa[1] + (pb[1] - pa[1]) * t, 6, 0, 7); ctx.fill();
@@ -675,6 +718,8 @@ function drawRoute() {
   }
 }
 window.addEventListener('resize', () => { mapCache = null; lastDraw = 0; });
+if (window.ResizeObserver) { const ro = new ResizeObserver(() => { mapCache = null; lastDraw = 0; drawRoute(); drawZoom(); });
+  for (const id of ['cvMap', 'cvProfile', 'cvZoom']) ro.observe($(id)); }
 fillRouteSelect('');
 $('btnDelRoute').disabled = true;
 
@@ -928,6 +973,18 @@ function drawZoom() {
 }
 
 try { const k = +localStorage.getItem('polku_k'); if (k >= 0.8 && k <= 2.5) S.k = k; } catch {}
+// ---------- Menu ----------
+const setMenu = open => { document.body.classList.toggle('menuOpen', open); };
+$('btnMenu').onclick = () => setMenu(true);
+$('btnMenuClose').onclick = () => setMenu(false);
+$('menuBack').onclick = () => setMenu(false);
+const logText = () => `Polku ${VERSION} – loki ${new Date().toLocaleString()}\n` + LOG.join('\n') + '\n';
+$('btnLogCopy').onclick = async () => {
+  try { await navigator.clipboard.writeText(logText()); setStatus(`Loki kopioitu (${LOG.length} riviä)`); }
+  catch (e) { log('Kopiointi: ' + errText(e)); setStatus('Kopiointi ei onnistunut'); }
+};
+$('btnLogSave').onclick = () => shareFile(new File([logText()], 'polku_loki_' + new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-') + '.txt', { type: 'text/plain' }));
+
 // ---------- Fullscreen (works only if the browser allows it) ----------
 {
   const el = document.documentElement;
