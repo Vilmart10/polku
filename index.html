@@ -74,6 +74,7 @@
     </select>
   </label>
   <label>Rattaat <input type="number" id="inFront" value="34" min="20" max="60" style="width:60px"> / <input type="number" id="inCog" value="14" min="10" max="40" style="width:60px"></label>
+  <label>Mäet <select id="selDiff"><option value="0.25">25 %</option><option value="0.5" selected>50 %</option><option value="0.75">75 %</option><option value="1">100 %</option></select></label>
   <label>Massa <input type="number" id="inMass" value="85" min="40" max="150"> kg</label>
   <label>Kaltevuus <button id="btnGradeDown" style="padding:6px 14px">−</button>
     <input type="range" id="inGrade" min="-8" max="15" step="0.5" value="0">
@@ -87,7 +88,7 @@
 
 <script>
 'use strict';
-const VERSION = 'v0.5';
+const VERSION = 'v0.6';
 document.getElementById('ver').textContent = VERSION;
 document.title = 'Polku ' + VERSION;
 // ---------- UUIDs (Bluetooth SIG) ----------
@@ -104,7 +105,7 @@ const P = { g:9.81, rho:1.2, cda:0.32, crr:0.004, eff:0.97 };
 
 // ---------- State ----------
 const S = {
-  gear: 11, mode: 'vsim', front: 34, cog: 14, k: 1, lastSim: null, grade: 0, mass: 85,
+  gear: 11, mode: 'vsim', front: 34, cog: 14, k: 1, diff: 0.5, steadySince: 0, gradeChangedAt: 0, lastSim: null, grade: 0, mass: 85,
   power: 0, cad: 0, cadEma: 0, hr: null, speed: 0, dist: 0,
   target: null, lastSent: null, lastSentAt: 0, shiftedAt: 0,
   running: false, elapsed: 0, energy: 0, samples: [],
@@ -235,7 +236,7 @@ function resistForce(v, gradePct) {
 function gearSpeed() { return S.cadEma / 60 * RATIOS[S.gear] * WHEEL; } // m/s
 function computeTarget() {
   const v = gearSpeed();
-  const w = v * resistForce(v, S.grade) / P.eff;
+  const w = v * resistForce(v, S.mode === 'vsim' ? S.grade * S.diff : S.grade) / P.eff;
   return Math.round(Math.min(S.pwrMax, Math.max(Math.max(S.pwrMin, 0), w)));
 }
 // --- Virtual gears in simulation mode ---
@@ -245,19 +246,23 @@ function computeTarget() {
 const M_T = 75; // assumed rider mass inside the trainer's own model (unknown, k absorbs error)
 const realRatio = () => S.front / S.cog;
 function vsimParams() {
-  const q = RATIOS[S.gear] / realRatio(), th = Math.atan(S.grade / 100);
+  const q = RATIOS[S.gear] / realRatio(), th = Math.atan(S.grade * S.diff / 100);
   const A = S.mass * P.g * (P.crr * Math.cos(th) + Math.sin(th)), B = 0.5 * P.rho * P.cda;
-  const gradeT = Math.max(-15, Math.min(20, (S.k * q * A / (M_T * P.g) - P.crr) * 100));
+  const gradeT = Math.max(-15, Math.min(20, (q * A / (M_T * P.g) - P.crr) * 100));
   const cw = Math.max(0, Math.min(2.55, S.k * q ** 3 * B));
   return { gradeT: Math.round(gradeT * 100) / 100, cw: Math.round(cw * 100) / 100, q, A, B };
 }
 function adaptK() {
-  if (S.mode !== 'vsim' || S.cadEma < 50 || S.power < 40 || performance.now() - S.shiftedAt < 4000) return;
+  const now = performance.now();
+  if (Math.abs(S.cad - S.cadEma) > 4) S.steadySince = now;          // cadence not steady
+  if (S.mode !== 'vsim' || S.cadEma < 60 || S.power < 60 || Math.abs(S.grade) > 0.5) return;
+  if (now - S.shiftedAt < 10000 || now - S.gradeChangedAt < 10000 || now - S.steadySince < 5000) return;
+  if (S.k * (RATIOS[S.gear] / realRatio()) ** 3 * 0.5 * P.rho * P.cda >= 2.5) return; // Cw saturated
   const vReal = S.cadEma / 60 * realRatio() * WHEEL;
   const { q, A, B } = vsimParams();
   const pred = (q * A + q ** 3 * B * vReal * vReal) * vReal;  // power the model asks for
   if (pred < 30) return;
-  S.k = Math.max(0.3, Math.min(3, S.k * (1 + 0.01 * (pred / S.power - 1))));
+  S.k = Math.max(0.5, Math.min(1.5, S.k * (1 + 0.003 * (pred / S.power - 1))));
 }
 
 async function pushTarget(force = false) {
@@ -358,12 +363,13 @@ $('btnRun').onclick = () => { S.running = !S.running; $('btnRun').textContent = 
 $('btnUp').onclick = () => shift(+1);
 $('btnDown').onclick = () => shift(-1);
 $('selMode').onchange = e => { S.mode = e.target.value; S.lastSent = null; S.lastSim = null; pushTarget(true); render(); };
+$('selDiff').onchange = e => { S.diff = +e.target.value; pushTarget(true); };
 $('inFront').onchange = e => { S.front = +e.target.value || 34; pushTarget(true); };
 $('inCog').onchange = e => { S.cog = +e.target.value || 14; pushTarget(true); };
 $('inMass').onchange = e => { S.mass = +e.target.value || 85; };
-$('inGrade').oninput = e => { S.grade = +e.target.value; render(); };
+$('inGrade').oninput = e => { S.grade = +e.target.value; S.gradeChangedAt = performance.now(); render(); };
 $('inGrade').onchange = () => pushTarget(true);
-function setGrade(g) { S.grade = Math.max(-8, Math.min(15, Math.round(g * 2) / 2)); $('inGrade').value = S.grade; render(); pushTarget(true); }
+function setGrade(g) { S.gradeChangedAt = performance.now(); S.grade = Math.max(-8, Math.min(15, Math.round(g * 2) / 2)); $('inGrade').value = S.grade; render(); pushTarget(true); }
 $('btnGradeDown').onclick = () => setGrade(S.grade - 0.5);
 $('btnGradeUp').onclick = () => setGrade(S.grade + 0.5);
 
