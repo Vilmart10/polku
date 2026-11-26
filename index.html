@@ -156,30 +156,33 @@ function onIBD(e) {
 }
 
 // ---------- Connect trainer ----------
-let trainer = null;
+let trainer = null, step = '';
+const errText = e => e ? `${e.name || ''} ${e.message || String(e)}`.trim() : 'tuntematon';
 async function connectTrainer() {
   if (!navigator.bluetooth) { alert('Selain ei tue Web Bluetoothia. Käytä Chromea (Mac) tai Bluefyä (iPad).'); return; }
   try {
     if (!trainer) {
-      trainer = await navigator.bluetooth.requestDevice({
-        filters: [{ services: [FTMS] }, { namePrefix: 'Zwift' }, { namePrefix: 'KICKR' }],
-        optionalServices: [FTMS],
-      });
+      step = 'laitevalinta';
+      trainer = await navigator.bluetooth.requestDevice({ filters: [{ services: [FTMS] }] });
       trainer.addEventListener('gattserverdisconnected', () => {
         S.connected = false; cpChar = null; cpBusy = false; updateDots(); setStatus('Trainer irti – paina Trainer yhdistääksesi uudelleen');
       });
     }
     setStatus('Yhdistetään ' + (trainer.name || 'traineriin') + '…');
+    step = 'GATT-yhteys';
     const server = await trainer.gatt.connect();
+    step = 'FTMS-palvelu';
     const svc = await server.getPrimaryService(FTMS);
     try {
       const pr = await (await svc.getCharacteristic(PWR_RANGE)).readValue();
       S.pwrMin = pr.getInt16(0, true); S.pwrMax = pr.getInt16(2, true);
       log(`Tehoalue ${S.pwrMin}–${S.pwrMax} W`);
     } catch { log('Tehoaluetta ei saatu, käytetään oletusta'); }
+    step = 'ohjauspiste';
     cpChar = await svc.getCharacteristic(CP);
     cpChar.addEventListener('characteristicvaluechanged', onCp);
     await cpChar.startNotifications();
+    step = 'tehodata';
     const ibd = await svc.getCharacteristic(IBD);
     ibd.addEventListener('characteristicvaluechanged', onIBD);
     await ibd.startNotifications();
@@ -188,13 +191,14 @@ async function connectTrainer() {
       st.addEventListener('characteristicvaluechanged', e => log('Status: ' + [...new Uint8Array(e.target.value.buffer)].map(b => b.toString(16)).join(' ')));
       await st.startNotifications();
     } catch {}
+    step = 'Request Control';
     const ok = await cmdRequestControl();
     log('Request Control: ' + (ok ? 'OK' : 'ei kuitattu'));
     await cmdStart();
     S.connected = true; S.lastSent = null; updateDots();
     setStatus('Yhdistetty: ' + (trainer.name || 'trainer'));
     pushTarget(true);
-  } catch (e) { log('Yhteysvirhe: ' + e.message); setStatus('Yhteys epäonnistui'); }
+  } catch (e) { log(`Yhteysvirhe (${step}): ${errText(e)}`); setStatus('Yhteys epäonnistui: ' + step); }
 }
 
 // ---------- Connect heart rate ----------
@@ -210,7 +214,7 @@ async function connectHr() {
     await ch.startNotifications();
     hrDevice.addEventListener('gattserverdisconnected', () => { $('dotHr').classList.remove('ok'); });
     $('dotHr').classList.add('ok');
-  } catch (e) { log('Syke: ' + e.message); }
+  } catch (e) { log('Syke: ' + errText(e)); }
 }
 
 // ---------- Virtual gear → target power ----------
