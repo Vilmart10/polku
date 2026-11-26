@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Polku – trainer v1</title>
+<title>Polku</title>
 <style>
   :root { --bg:#0e0f11; --panel:#17191c; --line:#2a2d32; --fg:#e8e6e1; --dim:#8a8d93; --acc:#f2b33d; --ok:#5cc28a; --bad:#e0605a; }
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
@@ -39,7 +39,7 @@
 </head>
 <body>
 <header>
-  <h1>POLKU</h1>
+  <h1>POLKU <span id="ver" style="color:var(--dim);font-weight:400;font-size:13px"></span></h1>
   <button id="btnTrainer"><span class="dot" id="dotTrainer"></span>Trainer</button>
   <button id="btnHr"><span class="dot" id="dotHr"></span>Syke</button>
   <button id="btnDemo">Demo</button>
@@ -80,6 +80,9 @@
 
 <script>
 'use strict';
+const VERSION = 'v0.3';
+document.getElementById('ver').textContent = VERSION;
+document.title = 'Polku ' + VERSION;
 // ---------- UUIDs (Bluetooth SIG) ----------
 const FTMS = 0x1826, IBD = 0x2AD2, CP = 0x2AD9, FM_STATUS = 0x2ADA, PWR_RANGE = 0x2AD8;
 const HRS = 0x180D, HRM = 0x2A37;
