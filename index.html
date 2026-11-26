@@ -108,7 +108,7 @@
 
 <script>
 'use strict';
-const VERSION = 'v0.12';
+const VERSION = 'v0.13';
 document.getElementById('ver').textContent = VERSION;
 document.title = 'Polku ' + VERSION;
 // ---------- UUIDs (Bluetooth SIG) ----------
@@ -762,6 +762,36 @@ const ZW_ASYNC = '00000002-19ca-4651-86e5-fa29dcdd09d1', ZW_RX = '00000003-19ca-
       ZW_TX = '00000004-19ca-4651-86e5-fa29dcdd09d1', ZW_6 = '00000006-19ca-4651-86e5-fa29dcdd09d1';
 const ZW_FC82 = '0000fc82-0000-1000-8000-00805f9b34fb';
 const RIDE_ON = [0x52, 0x69, 0x64, 0x65, 0x4f, 0x6e];
+// Bluefy rejects some requestDevice options instantly, so try several ways.
+// A quick rejection (< 700 ms, no chooser shown) moves straight on to the next way;
+// a cancelled chooser stops, and the next tap starts from the next way.
+const CLICK_WAYS = [
+  ['palvelu', { filters: [{ services: [ZW_SVC] }] }],
+  ['nimi', { filters: [{ namePrefix: 'Zwift' }] }],
+  ['kaikki', { acceptAllDevices: true }],
+  ['nimi+palvelu', { filters: [{ namePrefix: 'Zwift' }], optionalServices: [ZW_SVC] }],
+  ['kaikki+palvelu', { acceptAllDevices: true, optionalServices: [ZW_SVC] }],
+];
+let clickWay = 0;
+try { clickWay = +(localStorage.getItem('polku_clickway') || 0) % CLICK_WAYS.length; } catch {}
+async function pickClick() {
+  for (let n = 0; n < CLICK_WAYS.length; n++) {
+    const i = (clickWay + n) % CLICK_WAYS.length, [label, opts] = CLICK_WAYS[i];
+    step = 'Click-valinta: ' + label;
+    const t0 = performance.now();
+    try {
+      const dev = await navigator.bluetooth.requestDevice(opts);
+      clickWay = i; try { localStorage.setItem('polku_clickway', String(i)); } catch {}
+      log(`Click löytyi tavalla "${label}": ${dev.name || '?'}`);
+      return dev;
+    } catch (e) {
+      const ms = Math.round(performance.now() - t0);
+      log(`Tapa "${label}": ${errText(e)} (${ms} ms, ${typeof e})`);
+      if (ms > 700) { clickWay = (i + 1) % CLICK_WAYS.length; throw e; }   // chooser was shown and closed
+    }
+  }
+  throw new Error('mikään tapa ei avannut laitevalintaa');
+}
 let click = null, clickState = { plus: false, minus: false }, clickRawLeft = 40;
 const hex = dv => [...new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength)].map(b => b.toString(16).padStart(2, '0')).join(' ');
 const shortId = u => u.length > 8 ? u.slice(4, 8) : u;
@@ -797,8 +827,7 @@ async function connectClick() {
   if (!navigator.bluetooth) return;
   try {
     if (!click) {
-      step = 'Click-valinta';
-      click = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: [ZW_SVC, ZW_FC82, 0x180F] });
+      click = await pickClick();
       click.addEventListener('gattserverdisconnected', () => { $('dotClick').classList.remove('ok'); log('Click irti'); });
     }
     step = 'Click-yhteys';
