@@ -23,7 +23,10 @@
   .tile .k { font-size:12px; color:var(--dim); text-transform:uppercase; letter-spacing:.08em; }
   .tile .v { font-size:clamp(28px,5vw,56px); font-weight:600; font-variant-numeric:tabular-nums; line-height:1.1; }
   .tile .u { font-size:14px; color:var(--dim); margin-left:4px; }
-  .tile.big { grid-column:span 2; }
+  .tile.big, .tile.wide { grid-column:span 2; }
+  .gradeRow { display:flex; gap:14px; align-items:center; }
+  .gradeRow .v { min-width:4.2ch; }
+  #cvZoom { flex:1; min-width:0; height:64px; display:block; }
   .tile.big .v { font-size:clamp(44px,8.5vw,100px); }
   .gear .v { color:var(--acc); }
   .route { display:grid; grid-template-columns:1fr 2fr; gap:10px; margin-top:10px; }
@@ -54,16 +57,15 @@
 </header>
 
 <div class="grid">
-  <div class="tile big"><div class="k">Teho</div><div class="v"><span id="vPower">–</span><span class="u">W</span></div></div>
+  <div class="tile big"><div class="k">Teho <span style="text-transform:none;letter-spacing:0">· tavoite <span id="vTarget">–</span> W</span></div><div class="v"><span id="vPower">–</span><span class="u">W</span></div></div>
   <div class="tile big gear"><div class="k">Vaihde</div><div class="v"><span id="vGear">–</span><span class="u" id="vRatio"></span></div></div>
   <div class="tile"><div class="k">Kadenssi</div><div class="v"><span id="vCad">–</span><span class="u">rpm</span></div></div>
   <div class="tile"><div class="k">Nopeus</div><div class="v"><span id="vSpeed">–</span><span class="u">km/h</span></div></div>
   <div class="tile"><div class="k">Syke</div><div class="v"><span id="vHr">–</span><span class="u">bpm</span></div></div>
-  <div class="tile"><div class="k">Tavoite</div><div class="v"><span id="vTarget">–</span><span class="u">W</span></div></div>
+  <div class="tile"><div class="k">Keskiteho</div><div class="v"><span id="vAvg">–</span><span class="u">W</span></div></div>
   <div class="tile"><div class="k">Aika</div><div class="v"><span id="vTime">0:00</span></div></div>
   <div class="tile"><div class="k">Matka</div><div class="v"><span id="vDist">0.00</span><span class="u">km</span></div></div>
-  <div class="tile"><div class="k">Keskiteho</div><div class="v"><span id="vAvg">–</span><span class="u">W</span></div></div>
-  <div class="tile"><div class="k">Kaltevuus</div><div class="v"><span id="vGrade">0.0</span><span class="u">%</span></div></div>
+  <div class="tile wide"><div class="k">Kaltevuus</div><div class="gradeRow"><div class="v"><span id="vGrade">0.0</span><span class="u">%</span></div><canvas id="cvZoom"></canvas></div></div>
 </div>
 
 <div class="routebar">
@@ -108,7 +110,7 @@
 
 <script>
 'use strict';
-const VERSION = 'v0.14';
+const VERSION = 'v0.16';
 document.getElementById('ver').textContent = VERSION;
 document.title = 'Polku ' + VERSION;
 // ---------- UUIDs (Bluetooth SIG) ----------
@@ -125,7 +127,7 @@ const P = { g:9.81, rho:1.2, cda:0.32, crr:0.004, eff:0.97 };
 
 // ---------- State ----------
 const S = {
-  gear: 11, mode: 'vsim', front: 34, cog: 14, k: 1, diff: 0.5, steadySince: 0, gradeChangedAt: 0, lastSim: null, grade: 0, mass: 85,
+  gear: 11, mode: 'vsim', front: 34, cog: 14, k: 1.6, diff: 0.5, steadySince: 0, gradeChangedAt: 0, lastSim: null, grade: 0, mass: 85,
   power: 0, cad: 0, cadEma: 0, hr: null, speed: 0, dist: 0,
   target: null, lastSent: null, lastSentAt: 0, shiftedAt: 0,
   running: false, elapsed: 0, energy: 0, samples: [],
@@ -286,7 +288,8 @@ function adaptK() {
   const { q, A, B } = vsimParams();
   const pred = (q * A + q ** 3 * B * vReal * vReal) * vReal;  // power the model asks for
   if (pred < 30) return;
-  S.k = Math.max(0.5, Math.min(1.5, S.k * (1 + 0.003 * (pred / S.power - 1))));
+  S.k = Math.max(0.8, Math.min(2.5, S.k * (1 + 0.003 * (pred / S.power - 1))));
+  if (Math.random() < 0.05) try { localStorage.setItem('polku_k', S.k.toFixed(3)); } catch {}
 }
 
 async function pushTarget(force = false) {
@@ -378,6 +381,8 @@ function render() {
   drawRoute();
   $('vAvg').textContent = S.elapsed > 0 ? Math.round(S.energy / S.elapsed) : '–';
   $('vGrade').textContent = S.grade.toFixed(1);
+  $('vGrade').parentElement.style.color = gradeColor(S.grade);
+  drawZoom();
 }
 function updateDots() {
   $('dotTrainer').classList.toggle('ok', S.connected || S.demo);
@@ -793,6 +798,7 @@ async function pickClick() {
   }
   throw new Error('mikään tapa ei avannut laitevalintaa');
 }
+let clickUpAt = { plus: -1e9, minus: -1e9 };
 let click = null, clickState = { plus: false, minus: false }, clickRawLeft = 40;
 // Bluefy's DataView may lack byteOffset/byteLength, so read byte by byte.
 function bytesOf(dv) {
@@ -824,8 +830,12 @@ function onClickData(name, dv) {
     const m = pbDecode(b.subarray(1));
     const plus = m[1] === undefined ? clickState.plus : m[1] === 0;
     const minus = m[2] === undefined ? clickState.minus : m[2] === 0;
-    if (plus && !clickState.plus) shift(+1);
-    if (minus && !clickState.minus) shift(-1);
+    // Debounce: a press counts only if that button has been up for at least 80 ms
+    const now = performance.now();
+    if (!plus && clickState.plus) clickUpAt.plus = now;
+    if (!minus && clickState.minus) clickUpAt.minus = now;
+    if (plus && !clickState.plus && now - clickUpAt.plus >= 80) shift(+1);
+    if (minus && !clickState.minus && now - clickUpAt.minus >= 80) shift(-1);
     clickState = { plus, minus };
     log(`Click ${name}: ${hex(dv)} → plus=${plus ? 'alas' : 'ylös'} minus=${minus ? 'alas' : 'ylös'}`);
     return;
@@ -875,6 +885,49 @@ async function connectClick() {
 }
 $('btnClick').onclick = connectClick;
 
+// ---------- Grade colours (Zwift Climb Portal: ≤1 blue, 1–4 yellow, 4–8 orange, >8 red) ----------
+function gradeColor(g) {
+  if (g <= 1) return '#5aa9ff';
+  if (g <= 4) return '#f2c94c';
+  if (g <= 8) return '#f2994a';
+  return '#eb5757';
+}
+// ---------- 100 m zoomed profile: 25 m behind, 75 m ahead ----------
+const ZOOM_BACK = 25, ZOOM_AHEAD = 75, ZOOM_SPAN_M = 12; // fixed 12 m vertical span keeps slopes comparable
+function zoomAt(dRel) {                       // altitude and grade at dRel metres from the rider
+  if (S.route) {
+    const r = S.route, len = r.len;
+    let d = (S.loop ? S.dist % len : S.dist) + dRel;
+    if (S.loop) d = ((d % len) + len) % len; else d = Math.max(0, Math.min(len, d));
+    const x = Math.min(r.lat.length - 1, d / r.step);
+    return { alt: interp(r.alt, x), g: interp(r.grade, x) };
+  }
+  return { alt: dRel * S.grade / 100, g: S.grade };
+}
+function drawZoom() {
+  const cv = $('cvZoom'); if (!cv || !cv.clientWidth) return;
+  const { ctx, w, h } = setupCanvas(cv);
+  ctx.clearRect(0, 0, w, h);
+  const STEP = 2, pts = [];
+  for (let d = -ZOOM_BACK; d <= ZOOM_AHEAD; d += STEP) pts.push({ d, ...zoomAt(d) });
+  let lo = Math.min(...pts.map(p => p.alt)), hi = Math.max(...pts.map(p => p.alt));
+  const span = Math.max(ZOOM_SPAN_M, hi - lo), mid = (hi + lo) / 2;
+  lo = mid - span / 2; hi = mid + span / 2;
+  const X = d => (d + ZOOM_BACK) / (ZOOM_BACK + ZOOM_AHEAD) * w, Y = a => 4 + (hi - a) / (hi - lo) * (h - 8);
+  for (let i = 0; i < pts.length - 1; i++) {        // filled slices, coloured by grade
+    const a = pts[i], b = pts[i + 1];
+    ctx.beginPath(); ctx.moveTo(X(a.d), h); ctx.lineTo(X(a.d), Y(a.alt)); ctx.lineTo(X(b.d) + 0.7, Y(b.alt)); ctx.lineTo(X(b.d) + 0.7, h); ctx.closePath();
+    ctx.fillStyle = gradeColor((a.g + b.g) / 2) + (a.d < 0 ? '55' : 'aa'); ctx.fill();
+  }
+  ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(X(p.d), Y(p.alt)) : ctx.moveTo(X(p.d), Y(p.alt)));
+  ctx.strokeStyle = '#e8e6e1'; ctx.lineWidth = 1.5; ctx.stroke();
+  const here = zoomAt(0);
+  ctx.fillStyle = '#e8e6e1'; ctx.beginPath(); ctx.arc(X(0), Y(here.alt), 5, 0, 7); ctx.fill();
+  ctx.strokeStyle = gradeColor(S.grade); ctx.lineWidth = 2; ctx.stroke();
+  ctx.fillStyle = '#8a8d93'; ctx.font = '10px -apple-system, sans-serif'; ctx.fillText('100 m', w - 34, 11);
+}
+
+try { const k = +localStorage.getItem('polku_k'); if (k >= 0.8 && k <= 2.5) S.k = k; } catch {}
 // ---------- Fullscreen (works only if the browser allows it) ----------
 {
   const el = document.documentElement;
