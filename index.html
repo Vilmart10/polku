@@ -46,8 +46,10 @@
   <h1>POLKU <span id="ver" style="color:var(--dim);font-weight:400;font-size:13px"></span></h1>
   <button id="btnTrainer"><span class="dot" id="dotTrainer"></span>Trainer</button>
   <button id="btnHr"><span class="dot" id="dotHr"></span>Syke</button>
+  <button id="btnClick"><span class="dot" id="dotClick"></span>Click</button>
   <button id="btnDemo">Demo</button>
   <button id="btnRun">▶ Aloita</button>
+  <button id="btnFull" title="Koko ruutu">⛶</button>
   <span id="status" style="color:var(--dim);font-size:13px"></span>
 </header>
 
@@ -66,6 +68,7 @@
 
 <div class="routebar">
   <label>Reitti <select id="selRoute"><option value="">Ei reittiä (käsisäätö)</option></select></label>
+  <label><input type="checkbox" id="chkLoop"> Kierrä reittiä</label>
   <button id="btnAddFit">Lisää FIT-reitti</button>
   <button id="btnDelRoute">Poista reitti</button>
   <input type="file" id="inFit" style="display:none">
@@ -105,7 +108,7 @@
 
 <script>
 'use strict';
-const VERSION = 'v0.8';
+const VERSION = 'v0.12';
 document.getElementById('ver').textContent = VERSION;
 document.title = 'Polku ' + VERSION;
 // ---------- UUIDs (Bluetooth SIG) ----------
@@ -382,7 +385,7 @@ function updateDots() {
 }
 
 // ---------- UI wiring ----------
-$('btnTrainer').onclick = connectTrainer;
+$('btnTrainer').onclick = () => { keepAwake(); connectTrainer(); };
 $('btnHr').onclick = connectHr;
 $('btnDemo').onclick = () => { S.demo = !S.demo; updateDots(); setStatus(S.demo ? 'Demotila – ei traineria' : ''); };
 $('btnRun').onclick = () => { S.running = !S.running; $('btnRun').textContent = S.running ? '❚❚ Tauko' : '▶ Jatka'; keepAwake(); };
@@ -452,8 +455,29 @@ document.addEventListener('keydown', e => {
   if (['ArrowUp', 'ArrowRight', '+', 'PageDown', 'k'].includes(e.key)) { shift(+1); e.preventDefault(); }
   if (['ArrowDown', 'ArrowLeft', '-', 'PageUp', 'j'].includes(e.key)) { shift(-1); e.preventDefault(); }
 });
-let wake = null;
-async function keepAwake() { try { if (!wake && navigator.wakeLock) wake = await navigator.wakeLock.request('screen'); } catch {} }
+// ---------- Keep screen awake ----------
+// 1) Screen Wake Lock API if the browser has it, 2) fallback: tiny muted looping video (iOS keeps screen on while video plays)
+let wake = null, sleepVideo = null;
+async function keepAwake() {
+  try {
+    if (navigator.wakeLock) {
+      if (!wake) { wake = await navigator.wakeLock.request('screen'); wake.addEventListener('release', () => { wake = null; }); log('Näytön lukitus estetty (Wake Lock)'); }
+      return;
+    }
+  } catch (e) { log('Wake Lock: ' + errText(e)); }
+  try {
+    if (!sleepVideo) {
+      sleepVideo = document.createElement('video');
+      Object.assign(sleepVideo, { muted: true, loop: true, playsInline: true });
+      sleepVideo.setAttribute('playsinline', ''); sleepVideo.setAttribute('muted', '');
+      sleepVideo.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0.01;bottom:0;right:0;pointer-events:none';
+      sleepVideo.src = 'data:video/mp4;base64,AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAMvbW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAAB9AAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAll0cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAB9AAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAABAAAAAQAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAAfQAAAAAAABAAAAAAHRbWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAABAAAAAgABVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAABfG1pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAATxzdGJsAAAAvHN0c2QAAAAAAAAAAQAAAKxhdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAABAAEABIAAAASAAAAAAAAAABFUxhdmM2MC4zMS4xMDIgbGlieDI2NAAAAAAAAAAAAAAAGP//AAAAMmF2Y0MBZAAK/+EAF2dkAAqs2V7ARAAAAwAEAAADAAg8SJZYAQAEaO+8sP34+AAAAAAQcGFzcAAAAAEAAAABAAAAFGJ0cnQAAAAAAAALdAAAC3QAAAAYc3R0cwAAAAAAAAABAAAAAgAAQAAAAAAUc3RzcwAAAAAAAAABAAAAAQAAABxzdHNjAAAAAAAAAAEAAAABAAAAAgAAAAEAAAAcc3RzegAAAAAAAAAAAAAAAgAAAtEAAAAMAAAAFHN0Y28AAAAAAAAAAQAAA18AAABidWR0YQAAAFptZXRhAAAAAAAAACFoZGxyAAAAAAAAAABtZGlyYXBwbAAAAAAAAAAAAAAAAC1pbHN0AAAAJal0b28AAAAdZGF0YQAAAAEAAAAATGF2ZjYwLjE2LjEwMAAAAAhmcmVlAAAC5W1kYXQAAAK3BgX//7PcRem95tlIt5Ys2CDZI+7veDI2NCAtIGNvcmUgMTY0IHIzMTA4IDMxZTE5ZjkgLSBILjI2NC9NUEVHLTQgQVZDIGNvZGVjIC0gQ29weWxlZnQgMjAwMy0yMDIzIC0gaHR0cDovL3d3dy52aWRlb2xhbi5vcmcveDI2NC5odG1sIC0gb3B0aW9uczogY2FiYWM9MSByZWY9MSBkZWJsb2NrPTE6MDowIGFuYWx5c2U9MHgzOjB4MyBtZT1oZXggc3VibWU9MiBwc3k9MSBwc3lfcmQ9MS4wMDowLjAwIG1peGVkX3JlZj0wIG1lX3JhbmdlPTE2IGNocm9tYV9tZT0xIHRyZWxsaXM9MCA4eDhkY3Q9MSBjcW09MCBkZWFkem9uZT0yMSwxMSBmYXN0X3Bza2lwPTEgY2hyb21hX3FwX29mZnNldD0wIHRocmVhZHM9MSBsb29rYWhlYWRfdGhyZWFkcz0xIHNsaWNlZF90aHJlYWRzPTAgbnI9MCBkZWNpbWF0ZT0xIGludGVybGFjZWQ9MCBibHVyYXlfY29tcGF0PTAgc3RpdGNoYWJsZT0xIGNvbnN0cmFpbmVkX2ludHJhPTAgYmZyYW1lcz0zIGJfcHlyYW1pZD0yIGJfYWRhcHQ9MSBiX2JpYXM9MCBkaXJlY3Q9MSB3ZWlnaHRiPTEgb3Blbl9nb3A9MCB3ZWlnaHRwPTEga2V5aW50PTI1MCBrZXlpbnRfbWluPTEgc2NlbmVjdXQ9NDAgaW50cmFfcmVmcmVzaD0wIHJjX2xvb2thaGVhZD0xMCByYz1jcmYgbWJ0cmVlPTEgY3JmPTIzLjAgcWNvbXA9MC42MCBxcG1pbj0wIHFwbWF4PTY5IHFwc3RlcD00IGlwX3JhdGlvPTEuNDAgYXE9MToxLjAwAIAAAAASZYiEABn/7H/CVX/RApEebX/xAAAACEGaIRiDH/7w';
+      document.body.appendChild(sleepVideo);
+    }
+    if (sleepVideo.paused) { await sleepVideo.play(); log('Näytön lukitus estetty (video)'); }
+  } catch (e) { log('Valvetila: ' + errText(e)); }
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && (S.running || S.connected)) keepAwake(); });
 
 // ================= Routes from FIT files =================
 // Minimal FIT decoder: reads 'record' messages (global 20): lat/long, altitude, distance.
@@ -558,6 +582,8 @@ function selectRoute(name) {
   updateRouteGrade(); pushTarget(true); render();
 }
 $('selRoute').onchange = e => selectRoute(e.target.value);
+try { S.loop = localStorage.getItem('polku_loop') === '1'; $('chkLoop').checked = S.loop; } catch {}
+$('chkLoop').onchange = e => { S.loop = e.target.checked; S.lap = 0; try { localStorage.setItem('polku_loop', S.loop ? '1' : '0'); } catch {} updateRouteGrade(); lastDraw = 0; render(); };
 $('btnAddFit').onclick = () => $('inFit').click();
 $('inFit').onchange = async e => {
   const file = e.target.files[0]; e.target.value = '';
@@ -581,11 +607,14 @@ $('btnDelRoute').onclick = () => {
 // ---------- Position on route ----------
 function routePos() { if (!S.route) return null; const x = routeIndex(), r = S.route;
   return { lat: interp(r.lat, x), lon: interp(r.lon, x), alt: interp(r.alt, x) }; }
-function routeIndex() { const r = S.route; return Math.min(r.lat.length - 1, Math.max(0, S.dist / r.step)); }
+const routeDist = () => S.loop ? S.dist % S.route.len : S.dist;
+function routeIndex() { const r = S.route; return Math.min(r.lat.length - 1, Math.max(0, routeDist() / r.step)); }
 const interp = (arr, x) => { const i = Math.floor(x), t = x - i; return i + 1 < arr.length ? arr[i] + (arr[i + 1] - arr[i]) * t : arr[arr.length - 1]; };
 function updateRouteGrade() {
   if (!S.route) return;
-  const done = S.dist >= S.route.len;
+  const lap = Math.floor(S.dist / S.route.len) + 1;
+  if (S.loop && lap !== S.lap) { if (S.lap) { log(`Kierros ${lap} alkaa`); setStatus(`Kierros ${lap}`); } S.lap = lap; }
+  const done = !S.loop && S.dist >= S.route.len;
   const g = done ? 0 : Math.round(interp(S.route.grade, routeIndex()) * 10) / 10;
   if (g !== S.grade) { S.grade = g; S.gradeChangedAt = performance.now(); }
   if (done && !S.routeDone) { S.routeDone = true; setStatus('Reitti ajettu! 🎉'); }
@@ -636,7 +665,7 @@ function drawRoute() {
     const ax = X(x), ay = Y(interp(r.alt, x));
     ctx.strokeStyle = C.acc; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(ax, T); ctx.lineTo(ax, h - B); ctx.stroke();
     ctx.fillStyle = C.fg; ctx.beginPath(); ctx.arc(ax, ay, 6, 0, 7); ctx.fill(); ctx.strokeStyle = C.acc; ctx.lineWidth = 2; ctx.stroke();
-    const lbl = `${(S.dist / 1000).toFixed(2)} km · ${interp(r.alt, x).toFixed(0)} m · ${S.grade.toFixed(1)} %`;
+    const lbl = `${S.loop && S.lap > 1 ? 'kierros ' + S.lap + ' · ' : ''}${(routeDist() / 1000).toFixed(2)} km · ${interp(r.alt, x).toFixed(0)} m · ${S.grade.toFixed(1)} %`;
     ctx.fillStyle = C.fg; ctx.fillText(lbl, Math.min(Math.max(L, ax - ctx.measureText(lbl).width / 2), w - R - ctx.measureText(lbl).width), T + 4);
   }
 }
@@ -726,6 +755,97 @@ function buildFit(samples) {
   return f.bytes();
 }
 
+// ================= Zwift Click (experimental) =================
+// Protocol per reverse-engineering by ajchellew/zwiftplay and jat255/zwift_click_handling (unencrypted mode).
+const ZW_SVC = '00000001-19ca-4651-86e5-fa29dcdd09d1';
+const ZW_ASYNC = '00000002-19ca-4651-86e5-fa29dcdd09d1', ZW_RX = '00000003-19ca-4651-86e5-fa29dcdd09d1',
+      ZW_TX = '00000004-19ca-4651-86e5-fa29dcdd09d1', ZW_6 = '00000006-19ca-4651-86e5-fa29dcdd09d1';
+const ZW_FC82 = '0000fc82-0000-1000-8000-00805f9b34fb';
+const RIDE_ON = [0x52, 0x69, 0x64, 0x65, 0x4f, 0x6e];
+let click = null, clickState = { plus: false, minus: false }, clickRawLeft = 40;
+const hex = dv => [...new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength)].map(b => b.toString(16).padStart(2, '0')).join(' ');
+const shortId = u => u.length > 8 ? u.slice(4, 8) : u;
+
+function pbDecode(bytes) {                 // minimal protobuf: varint fields only
+  const out = {}; let i = 0;
+  const varint = () => { let v = 0, s = 0, b; do { b = bytes[i++]; v += (b & 0x7f) * 2 ** s; s += 7; } while (b & 0x80 && i < bytes.length); return v; };
+  while (i < bytes.length) {
+    const key = varint(), f = Math.floor(key / 8), w = key & 7;
+    if (w === 0) out[f] = varint();
+    else if (w === 2) { const len = varint(); i += len; }
+    else if (w === 5) i += 4; else if (w === 1) i += 8; else break;
+  }
+  return out;
+}
+function onClickData(name, dv) {
+  const b = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+  const type = b[0];
+  if (type === 0x37) {                         // Click button status: field 1 = plus, field 2 = minus, 0 = pressed
+    const m = pbDecode(b.subarray(1));
+    const plus = m[1] === undefined ? clickState.plus : m[1] === 0;
+    const minus = m[2] === undefined ? clickState.minus : m[2] === 0;
+    if (plus && !clickState.plus) shift(+1);
+    if (minus && !clickState.minus) shift(-1);
+    clickState = { plus, minus };
+    log(`Click ${name}: ${hex(dv)} → plus=${plus ? 'alas' : 'ylös'} minus=${minus ? 'alas' : 'ylös'}`);
+    return;
+  }
+  if (type === 0x19) { const m = pbDecode(b.subarray(1)); log(`Click akku: ${m[2] ?? '?'} %`); return; }
+  if (clickRawLeft-- > 0) log(`Click ${name}: ${hex(dv)}`);
+}
+async function connectClick() {
+  if (!navigator.bluetooth) return;
+  try {
+    if (!click) {
+      step = 'Click-valinta';
+      click = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: [ZW_SVC, ZW_FC82, 0x180F] });
+      click.addEventListener('gattserverdisconnected', () => { $('dotClick').classList.remove('ok'); log('Click irti'); });
+    }
+    step = 'Click-yhteys';
+    const server = await click.gatt.connect();
+    log('Click yhdistetty: ' + (click.name || '?'));
+    step = 'Click-palvelut';
+    let svcs = [];
+    try { svcs = await server.getPrimaryServices(); } catch (e) { log('Palvelulista: ' + errText(e)); }
+    for (const s of svcs) {
+      let chars = [];
+      try { chars = await s.getCharacteristics(); } catch {}
+      log(`Palvelu ${s.uuid}: ` + chars.map(c => shortId(c.uuid) + '[' + ['read','write','writeWithoutResponse','notify','indicate'].filter(p => c.properties[p]).join(',') + ']').join(' '));
+    }
+    const svc = svcs.find(s => s.uuid === ZW_SVC) || await server.getPrimaryService(ZW_SVC);
+    for (const [id, name] of [[ZW_ASYNC, 'async'], [ZW_TX, 'syncTX'], [ZW_6, 'ch6']]) {
+      try {
+        const ch = await svc.getCharacteristic(id);
+        ch.addEventListener('characteristicvaluechanged', e => onClickData(name, e.target.value));
+        await ch.startNotifications();
+      } catch (e) { log(`Click ${name}: ${errText(e)}`); }
+    }
+    try {
+      const bat = await (await server.getPrimaryService(0x180F)).getCharacteristic(0x2A19);
+      log('Click akku: ' + (await bat.readValue()).getUint8(0) + ' %');
+    } catch {}
+    step = 'RideOn';
+    const rx = await svc.getCharacteristic(ZW_RX);
+    const buf = new Uint8Array(RIDE_ON);
+    await (rx.writeValueWithResponse ? rx.writeValueWithResponse(buf) : rx.writeValue(buf));
+    log('RideOn lähetetty – paina Clickin + ja − nappeja');
+    $('dotClick').classList.add('ok');
+  } catch (e) { log(`Click-virhe (${step}): ${errText(e)}`); setStatus('Click: ' + errText(e)); }
+}
+$('btnClick').onclick = connectClick;
+
+// ---------- Fullscreen (works only if the browser allows it) ----------
+{
+  const el = document.documentElement;
+  const req = el.requestFullscreen || el.webkitRequestFullscreen;
+  const exit = document.exitFullscreen || document.webkitExitFullscreen;
+  const isFull = () => document.fullscreenElement || document.webkitFullscreenElement;
+  if (!req) $('btnFull').style.display = 'none';
+  else $('btnFull').onclick = async () => {
+    try { if (isFull()) await exit.call(document); else await req.call(el); }
+    catch (e) { log('Koko ruutu: ' + errText(e)); setStatus('Selain ei salli koko ruudun tilaa'); }
+  };
+}
 render(); updateDots();
 setInterval(tick, DT * 1000);
 </script>
