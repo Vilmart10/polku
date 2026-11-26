@@ -110,7 +110,7 @@
 
 <script>
 'use strict';
-const VERSION = 'v0.16';
+const VERSION = 'v0.17';
 document.getElementById('ver').textContent = VERSION;
 document.title = 'Polku ' + VERSION;
 // ---------- UUIDs (Bluetooth SIG) ----------
@@ -892,8 +892,8 @@ function gradeColor(g) {
   if (g <= 8) return '#f2994a';
   return '#eb5757';
 }
-// ---------- 100 m zoomed profile: 25 m behind, 75 m ahead ----------
-const ZOOM_BACK = 25, ZOOM_AHEAD = 75, ZOOM_SPAN_M = 12; // fixed 12 m vertical span keeps slopes comparable
+// ---------- 200 m zoomed profile: 50 m behind, 150 m ahead ----------
+const ZOOM_BACK = 50, ZOOM_AHEAD = 150, ZOOM_SPAN_M = 20; // fixed 12 m vertical span keeps slopes comparable
 function zoomAt(dRel) {                       // altitude and grade at dRel metres from the rider
   if (S.route) {
     const r = S.route, len = r.len;
@@ -908,7 +908,7 @@ function drawZoom() {
   const cv = $('cvZoom'); if (!cv || !cv.clientWidth) return;
   const { ctx, w, h } = setupCanvas(cv);
   ctx.clearRect(0, 0, w, h);
-  const STEP = 2, pts = [];
+  const STEP = 4, pts = [];
   for (let d = -ZOOM_BACK; d <= ZOOM_AHEAD; d += STEP) pts.push({ d, ...zoomAt(d) });
   let lo = Math.min(...pts.map(p => p.alt)), hi = Math.max(...pts.map(p => p.alt));
   const span = Math.max(ZOOM_SPAN_M, hi - lo), mid = (hi + lo) / 2;
@@ -924,7 +924,7 @@ function drawZoom() {
   const here = zoomAt(0);
   ctx.fillStyle = '#e8e6e1'; ctx.beginPath(); ctx.arc(X(0), Y(here.alt), 5, 0, 7); ctx.fill();
   ctx.strokeStyle = gradeColor(S.grade); ctx.lineWidth = 2; ctx.stroke();
-  ctx.fillStyle = '#8a8d93'; ctx.font = '10px -apple-system, sans-serif'; ctx.fillText('100 m', w - 34, 11);
+  ctx.fillStyle = '#8a8d93'; ctx.font = '10px -apple-system, sans-serif'; ctx.fillText('200 m', w - 34, 11);
 }
 
 try { const k = +localStorage.getItem('polku_k'); if (k >= 0.8 && k <= 2.5) S.k = k; } catch {}
