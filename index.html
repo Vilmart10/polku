@@ -68,10 +68,12 @@
 <div class="settings">
   <label>Tila
     <select id="selMode">
+      <option value="vsim">Virtuaalivaihteet (sim)</option>
       <option value="gears">Virtuaalivaihteet (ERG)</option>
-      <option value="sim">Simulaatio (kaltevuus)</option>
+      <option value="sim">Simulaatio ilman vaihteita</option>
     </select>
   </label>
+  <label>Rattaat <input type="number" id="inFront" value="34" min="20" max="60" style="width:60px"> / <input type="number" id="inCog" value="14" min="10" max="40" style="width:60px"></label>
   <label>Massa <input type="number" id="inMass" value="85" min="40" max="150"> kg</label>
   <label>Kaltevuus <input type="range" id="inGrade" min="-8" max="15" step="0.5" value="0"></label>
 </div>
@@ -80,7 +82,7 @@
 
 <script>
 'use strict';
-const VERSION = 'v0.3';
+const VERSION = 'v0.4';
 document.getElementById('ver').textContent = VERSION;
 document.title = 'Polku ' + VERSION;
 // ---------- UUIDs (Bluetooth SIG) ----------
@@ -97,7 +99,7 @@ const P = { g:9.81, rho:1.2, cda:0.32, crr:0.004, eff:0.97 };
 
 // ---------- State ----------
 const S = {
-  gear: 11, mode: 'gears', grade: 0, mass: 85,
+  gear: 11, mode: 'vsim', front: 34, cog: 14, k: 1, lastSim: null, grade: 0, mass: 85,
   power: 0, cad: 0, cadEma: 0, hr: null, speed: 0, dist: 0,
   target: null, lastSent: null, lastSentAt: 0, shiftedAt: 0,
   running: false, elapsed: 0, energy: 0, samples: [],
@@ -133,8 +135,8 @@ const i16 = v => { v = Math.round(v); return [v & 0xff, (v >> 8) & 0xff]; };
 const cmdRequestControl = () => cpSend([0x00]);
 const cmdStart = () => cpSend([0x07]);
 const cmdTargetPower = w => cpSend([0x05, ...i16(w)]);
-const cmdSim = gradePct => cpSend([0x11, ...i16(0), ...i16(gradePct * 100),
-  Math.round(P.crr / 0.0001), Math.round(0.5 * P.rho * P.cda / 0.01) /* Cw = ½·ρ·CdA, kg/m */]);
+const cmdSim = (gradePct, cw = 0.5 * P.rho * P.cda) => cpSend([0x11, ...i16(0), ...i16(gradePct * 100),
+  Math.round(P.crr / 0.0001), Math.min(255, Math.round(cw / 0.01)) /* Cw = ½·ρ·CdA, kg/m */]);
 
 // ---------- Indoor Bike Data parser ----------
 function parseIBD(dv) {
@@ -231,11 +233,40 @@ function computeTarget() {
   const w = v * resistForce(v, S.grade) / P.eff;
   return Math.round(Math.min(S.pwrMax, Math.max(Math.max(S.pwrMin, 0), w)));
 }
+// --- Virtual gears in simulation mode ---
+// Trainer applies F = M_T·g·(crr + grade) + Cw·v², v = its own (real-gear) wheel speed.
+// Virtual gear q = r_virtual / r_real  →  wanted F_real(v) = q·A + q³·B·v²
+// (A = rolling+gravity force, B = ½ρCdA). S.k adapts slowly so measured ≈ modelled power.
+const M_T = 75; // assumed rider mass inside the trainer's own model (unknown, k absorbs error)
+const realRatio = () => S.front / S.cog;
+function vsimParams() {
+  const q = RATIOS[S.gear] / realRatio(), th = Math.atan(S.grade / 100);
+  const A = S.mass * P.g * (P.crr * Math.cos(th) + Math.sin(th)), B = 0.5 * P.rho * P.cda;
+  const gradeT = Math.max(-15, Math.min(20, (S.k * q * A / (M_T * P.g) - P.crr) * 100));
+  const cw = Math.max(0, Math.min(2.55, S.k * q ** 3 * B));
+  return { gradeT: Math.round(gradeT * 100) / 100, cw: Math.round(cw * 100) / 100, q, A, B };
+}
+function adaptK() {
+  if (S.mode !== 'vsim' || S.cadEma < 50 || S.power < 40 || performance.now() - S.shiftedAt < 4000) return;
+  const vReal = S.cadEma / 60 * realRatio() * WHEEL;
+  const { q, A, B } = vsimParams();
+  const pred = (q * A + q ** 3 * B * vReal * vReal) * vReal;  // power the model asks for
+  if (pred < 30) return;
+  S.k = Math.max(0.3, Math.min(3, S.k * (1 + 0.01 * (pred / S.power - 1))));
+}
+
 async function pushTarget(force = false) {
   if (S.demo || !S.connected) return;
   const now = performance.now();
   if (S.mode === 'sim') {
     if (force || S.lastSent !== S.grade) { if (await cmdSim(S.grade)) S.lastSent = S.grade; }
+    return;
+  }
+  if (S.mode === 'vsim') {
+    const p = vsimParams(), l = S.lastSim;
+    const changed = !l || Math.abs(p.gradeT - l.gradeT) >= 0.1 || Math.abs(p.cw - l.cw) >= Math.max(0.01, l.cw * 0.03);
+    if (!(force || (changed && now - S.lastSentAt > 3000))) return;
+    if (await cmdSim(p.gradeT, p.cw)) { S.lastSim = p; S.lastSentAt = performance.now(); }
     return;
   }
   const t = S.target;
@@ -250,7 +281,8 @@ function shift(d) {
   const g = Math.min(RATIOS.length - 1, Math.max(0, S.gear + d));
   if (g === S.gear) return;
   S.gear = g; S.shiftedAt = performance.now();
-  if (S.mode === 'gears') { S.target = computeTarget(); pushTarget(true); }
+  if (S.mode === 'gears') S.target = computeTarget();
+  if (S.mode !== 'sim') pushTarget(true);
   render();
 }
 
@@ -260,12 +292,13 @@ function tick() {
   if (S.demo) {
     const t = performance.now() / 1000;
     S.cad = Math.max(0, 86 + 6 * Math.sin(t / 7) + (Math.random() - .5) * 3);
-    const goal = S.mode === 'gears' ? (S.target ?? 150) : 180 + 20 * Math.sin(t / 11);
+    const goal = S.mode !== 'sim' ? (S.target ?? 150) : 180 + 20 * Math.sin(t / 11);
     S.power = Math.max(0, S.power + (goal - S.power) * 0.35 + (Math.random() - .5) * 6);
     if (!hrDevice) S.hr = Math.round(120 + S.power / 10);
   }
   S.cadEma = S.cadEma ? S.cadEma + 0.3 * (S.cad - S.cadEma) : S.cad;
-  if (S.mode === 'gears') S.target = computeTarget(); else S.target = null;
+  S.target = S.mode === 'sim' ? null : computeTarget();
+  adaptK();
 
   // Bike speed from measured power (with inertia)
   const v = S.speed, prop = S.power * P.eff / Math.max(v, 1);
@@ -278,6 +311,9 @@ function tick() {
       S.samples.push({ t: Date.now(), p: Math.round(S.power), c: Math.round(S.cad), hr: S.hr, v: S.speed, d: S.dist, g: S.grade });
   }
   pushTarget();
+  if (S.mode === 'vsim' && S.running && Math.floor(S.elapsed) % 30 === 0 && Math.floor(S.elapsed) !== Math.floor(S.elapsed - DT)) {
+    const p = vsimParams(); log(`k=${S.k.toFixed(2)} grade=${p.gradeT}% Cw=${p.cw}`);
+  }
   render();
 }
 
@@ -289,8 +325,8 @@ function render() {
   $('vCad').textContent = Math.round(S.cad);
   $('vSpeed').textContent = (S.speed * 3.6).toFixed(1);
   $('vHr').textContent = S.hr ?? '–';
-  $('vGear').textContent = S.mode === 'gears' ? S.gear + 1 : '–';
-  $('vRatio').textContent = S.mode === 'gears' ? RATIOS[S.gear].toFixed(2) : '';
+  $('vGear').textContent = S.mode !== 'sim' ? S.gear + 1 : '–';
+  $('vRatio').textContent = S.mode !== 'sim' ? RATIOS[S.gear].toFixed(2) : '';
   $('vTarget').textContent = S.target ?? '–';
   $('vTime').textContent = fmtTime(S.elapsed);
   $('vDist').textContent = (S.dist / 1000).toFixed(2);
@@ -309,7 +345,9 @@ $('btnDemo').onclick = () => { S.demo = !S.demo; updateDots(); setStatus(S.demo 
 $('btnRun').onclick = () => { S.running = !S.running; $('btnRun').textContent = S.running ? '❚❚ Tauko' : '▶ Jatka'; keepAwake(); };
 $('btnUp').onclick = () => shift(+1);
 $('btnDown').onclick = () => shift(-1);
-$('selMode').onchange = e => { S.mode = e.target.value; S.lastSent = null; pushTarget(true); render(); };
+$('selMode').onchange = e => { S.mode = e.target.value; S.lastSent = null; S.lastSim = null; pushTarget(true); render(); };
+$('inFront').onchange = e => { S.front = +e.target.value || 34; pushTarget(true); };
+$('inCog').onchange = e => { S.cog = +e.target.value || 14; pushTarget(true); };
 $('inMass').onchange = e => { S.mass = +e.target.value || 85; };
 $('inGrade').oninput = e => { S.grade = +e.target.value; render(); };
 $('inGrade').onchange = () => pushTarget(true);
