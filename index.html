@@ -95,6 +95,7 @@
   <label>Kaltevuus <button id="btnGradeDown" style="padding:6px 14px">−</button>
     <input type="range" id="inGrade" min="-8" max="15" step="0.5" value="0">
     <button id="btnGradeUp" style="padding:6px 14px">+</button></label>
+  <button id="btnFit" style="border-color:var(--acc);color:var(--acc)">Tallenna FIT (Strava)</button>
   <button id="btnSave">Tallenna CSV</button>
   <button id="btnCopy">Kopioi CSV</button>
   <button id="btnClear">Tyhjennä</button>
@@ -104,7 +105,7 @@
 
 <script>
 'use strict';
-const VERSION = 'v0.7';
+const VERSION = 'v0.8';
 document.getElementById('ver').textContent = VERSION;
 document.title = 'Polku ' + VERSION;
 // ---------- UUIDs (Bluetooth SIG) ----------
@@ -342,10 +343,12 @@ function tick() {
     if (Math.floor(S.elapsed) !== Math.floor(S.elapsed - DT))
     {
       const vp = S.mode === 'vsim' ? vsimParams() : null;
+      const pos = routePos();
       S.samples.push({ t: new Date().toISOString(), el: Math.floor(S.elapsed), mode: S.mode, gear: S.gear + 1,
         p: Math.round(S.power), c: Math.round(S.cad), hr: S.hr ?? '', v: (S.speed * 3.6).toFixed(2),
         d: Math.round(S.dist), g: S.grade, tgt: S.target ?? '', k: S.k.toFixed(3),
-        gT: vp ? vp.gradeT : '', cw: vp ? vp.cw : '' });
+        gT: vp ? vp.gradeT : '', cw: vp ? vp.cw : '',
+        lat: pos ? pos.lat.toFixed(6) : '', lon: pos ? pos.lon.toFixed(6) : '', alt: pos ? pos.alt.toFixed(1) : '', dm: S.dist.toFixed(1) });
       if (S.samples.length % 10 === 0) try { localStorage.setItem('polku_samples', JSON.stringify(S.samples)); } catch {}
     }
   }
@@ -397,12 +400,28 @@ $('btnGradeDown').onclick = () => setGrade(S.grade - 0.5);
 $('btnGradeUp').onclick = () => setGrade(S.grade + 0.5);
 
 // ---------- Recording export ----------
-const COLS = ['t','el','mode','gear','p','c','hr','v','d','g','tgt','k','gT','cw'];
+const COLS = ['t','el','mode','gear','p','c','hr','v','d','g','tgt','k','gT','cw','lat','lon','alt'];
 function csv() {
   return '# Polku ' + VERSION + ', massa ' + S.mass + ' kg, rattaat ' + S.front + '/' + S.cog + '\n' +
     COLS.join(',') + '\n' + S.samples.map(r => COLS.map(c => r[c]).join(',')).join('\n') + '\n';
 }
 function fileName() { return 'polku_' + new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-') + '.csv'; }
+async function shareFile(file) {
+  try {
+    if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file] }); return true; }
+  } catch (e) { if (e.name === 'AbortError') return false; log('Jako: ' + errText(e)); }
+  const a = document.createElement('a'); a.href = URL.createObjectURL(file); a.download = file.name;
+  document.body.appendChild(a); a.click(); a.remove(); return true;
+}
+$('btnFit').onclick = async () => {
+  if (S.samples.length < 10) { setStatus('Liian lyhyt ajo tallennettavaksi'); return; }
+  if (S.running) { S.running = false; $('btnRun').textContent = '▶ Jatka'; }
+  try {
+    const bytes = buildFit(S.samples.map(s => ({ ...s, d: s.dm ?? s.d })));
+    const name = 'Polku_' + (S.route ? S.route.name.replace(/\W+/g, '_') + '_' : '') + new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-') + '.fit';
+    if (await shareFile(new File([bytes], name, { type: 'application/octet-stream' }))) setStatus('FIT tallennettu: ' + name);
+  } catch (e) { log('FIT: ' + errText(e)); setStatus('FIT-tallennus epäonnistui'); }
+};
 $('btnSave').onclick = async () => {
   if (!S.samples.length) { setStatus('Ei tallennettavaa – paina Aloita'); return; }
   const file = new File([csv()], fileName(), { type: 'text/csv' });
@@ -560,6 +579,8 @@ $('btnDelRoute').onclick = () => {
 };
 
 // ---------- Position on route ----------
+function routePos() { if (!S.route) return null; const x = routeIndex(), r = S.route;
+  return { lat: interp(r.lat, x), lon: interp(r.lon, x), alt: interp(r.alt, x) }; }
 function routeIndex() { const r = S.route; return Math.min(r.lat.length - 1, Math.max(0, S.dist / r.step)); }
 const interp = (arr, x) => { const i = Math.floor(x), t = x - i; return i + 1 < arr.length ? arr[i] + (arr[i + 1] - arr[i]) * t : arr[arr.length - 1]; };
 function updateRouteGrade() {
@@ -622,6 +643,88 @@ function drawRoute() {
 window.addEventListener('resize', () => { mapCache = null; lastDraw = 0; });
 fillRouteSelect('');
 $('btnDelRoute').disabled = true;
+
+// ================= FIT export (activity file for Strava) =================
+const FIT_EPOCH = 631065600; // 1989-12-31T00:00:00Z in Unix seconds
+const CRC_T = [0x0000,0xCC01,0xD801,0x1400,0xF001,0x3C00,0x2800,0xE401,0xA001,0x6C00,0x7800,0xB401,0x5000,0x9C01,0x8801,0x4400];
+function fitCrc(bytes, crc = 0) {
+  for (const b of bytes) {
+    let t = CRC_T[crc & 0xF]; crc = (crc >> 4) & 0x0FFF; crc = crc ^ t ^ CRC_T[b & 0xF];
+    t = CRC_T[crc & 0xF]; crc = (crc >> 4) & 0x0FFF; crc = crc ^ t ^ CRC_T[(b >> 4) & 0xF];
+  }
+  return crc;
+}
+// base types: [code, size, invalid]
+const FT = { enum: [0x00, 1, 0xFF], u8: [0x02, 1, 0xFF], u16: [0x84, 2, 0xFFFF], s32: [0x85, 4, 0x7FFFFFFF], u32: [0x86, 4, 0xFFFFFFFF], u32z: [0x8C, 4, 0] };
+function fitWriter() {
+  const out = []; let local = 0; const defs = {};
+  const push = (type, v) => {
+    const [code, size, inv] = FT[type];
+    if (v === undefined || v === null || Number.isNaN(v)) v = inv;
+    v = Math.round(v);
+    const b = new DataView(new ArrayBuffer(size));
+    if (size === 1) b.setUint8(0, v); else if (size === 2) b.setUint16(0, v, true);
+    else if (code === 0x85) b.setInt32(0, v, true); else b.setUint32(0, v >>> 0, true);
+    out.push(...new Uint8Array(b.buffer));
+  };
+  return {
+    msg(gnum, fields, values) {         // fields: [[num, type, key], ...]
+      const sig = gnum + ':' + fields.map(f => f[0]).join(',');
+      if (!(sig in defs)) {
+        const l = defs[sig] = local++ % 16;
+        out.push(0x40 | l, 0, 0, gnum & 0xFF, gnum >> 8, fields.length);
+        for (const [num, type] of fields) out.push(num, FT[type][1], FT[type][0]);
+      }
+      out.push(defs[sig]);
+      for (const [, type, key] of fields) push(type, values[key]);
+    },
+    bytes() {
+      const data = Uint8Array.from(out), hdr = new Uint8Array(14), dv = new DataView(hdr.buffer);
+      hdr[0] = 14; hdr[1] = 0x20; dv.setUint16(2, 2132, true); dv.setUint32(4, data.length, true);
+      hdr.set([46, 70, 73, 84], 8); dv.setUint16(12, fitCrc(hdr.subarray(0, 12)), true);
+      const crc = fitCrc(data, fitCrc(hdr));
+      const file = new Uint8Array(14 + data.length + 2); file.set(hdr); file.set(data, 14);
+      file[file.length - 2] = crc & 0xFF; file[file.length - 1] = crc >> 8;
+      return file;
+    },
+  };
+}
+function buildFit(samples) {
+  const ts = s => Math.floor(Date.parse(s.t) / 1000) - FIT_EPOCH;
+  const f = fitWriter(), t0 = ts(samples[0]), t1 = ts(samples[samples.length - 1]);
+  const semi = deg => deg * 2147483648 / 180;
+  const num = v => (v === '' || v === undefined || v === null) ? undefined : +v;
+  f.msg(0, [[0,'enum','type'],[1,'u16','man'],[2,'u16','prod'],[3,'u32z','sn'],[4,'u32','tc']],
+    { type: 4, man: 255, prod: 1, sn: 12345, tc: t0 });
+  f.msg(21, [[253,'u32','ts'],[0,'enum','ev'],[1,'enum','et']], { ts: t0, ev: 0, et: 0 });
+  const RF = [[253,'u32','ts'],[0,'s32','lat'],[1,'s32','lon'],[2,'u16','alt'],[5,'u32','d'],[6,'u16','v'],[7,'u16','p'],[4,'u8','c'],[3,'u8','hr']];
+  let pSum = 0, pMax = 0, cSum = 0, cN = 0, hSum = 0, hN = 0, hMax = 0, asc = 0, prevAlt = null, prevTs = null;
+  for (const s of samples) {
+    const t = ts(s); if (prevTs !== null && t <= prevTs) continue; prevTs = t;
+    const hr = num(s.hr), c = num(s.c), p = num(s.p), alt = num(s.alt);
+    f.msg(20, RF, { ts: t, lat: s.lat !== undefined && s.lat !== '' ? semi(+s.lat) : undefined, lon: s.lon !== undefined && s.lon !== '' ? semi(+s.lon) : undefined,
+      alt: alt !== undefined ? (alt + 500) * 5 : undefined, d: num(s.d) * 100, v: num(s.v) / 3.6 * 1000, p, c, hr });
+    pSum += p || 0; pMax = Math.max(pMax, p || 0);
+    if (c > 0) { cSum += c; cN++; }
+    if (hr) { hSum += hr; hN++; hMax = Math.max(hMax, hr); }
+    if (alt !== undefined) { if (prevAlt !== null && alt > prevAlt) asc += alt - prevAlt; prevAlt = alt; }
+  }
+  const n = samples.length, last = samples[n - 1];
+  const sum = { ts: t1, st: t0, el: (t1 - t0 + 1) * 1000, tm: n * 1000, d: num(last.d) * 100,
+    ap: pSum / n, mp: pMax, ah: hN ? hSum / hN : undefined, mh: hN ? hMax : undefined, ac: cN ? cSum / cN : undefined,
+    asc: prevAlt !== null ? asc : undefined, sport: 2, sub: 58 };
+  f.msg(21, [[253,'u32','ts'],[0,'enum','ev'],[1,'enum','et']], { ts: t1, ev: 0, et: 4 });
+  f.msg(19, [[253,'u32','ts'],[2,'u32','st'],[7,'u32','el'],[8,'u32','tm'],[9,'u32','d'],[0,'enum','ev'],[1,'enum','et'],
+    [19,'u16','ap'],[20,'u16','mp'],[15,'u8','ah'],[16,'u8','mh'],[17,'u8','ac'],[21,'u16','asc'],[25,'enum','sport'],[39,'enum','sub']],
+    { ...sum, ev: 9, et: 1 });
+  f.msg(18, [[253,'u32','ts'],[2,'u32','st'],[7,'u32','el'],[8,'u32','tm'],[9,'u32','d'],[0,'enum','ev'],[1,'enum','et'],
+    [5,'enum','sport'],[6,'enum','sub'],[20,'u16','ap'],[21,'u16','mp'],[16,'u8','ah'],[17,'u8','mh'],[18,'u8','ac'],[22,'u16','asc'],
+    [25,'u16','fl'],[26,'u16','nl']], { ...sum, ev: 8, et: 1, fl: 0, nl: 1 });
+  const tz = -new Date().getTimezoneOffset() * 60;
+  f.msg(34, [[253,'u32','ts'],[0,'u32','tm'],[1,'u16','ns'],[2,'enum','type'],[3,'enum','ev'],[4,'enum','et'],[5,'u32','lts']],
+    { ts: t1, tm: n * 1000, ns: 1, type: 0, ev: 26, et: 1, lts: t1 + tz });
+  return f.bytes();
+}
 
 render(); updateDots();
 setInterval(tick, DT * 1000);
