@@ -134,7 +134,7 @@
 
 <script>
 'use strict';
-const VERSION = 'v0.19';
+const VERSION = 'v0.20';
 document.getElementById('ver').textContent = VERSION;
 document.title = 'Polku ' + VERSION;
 // ---------- UUIDs (Bluetooth SIG) ----------
@@ -489,7 +489,11 @@ $('btnClear').onclick = () => {
 };
 try { const old = JSON.parse(localStorage.getItem('polku_samples') || '[]');
   const last = old.length && Date.parse(old[old.length - 1].t);
-  if (last && Date.now() - last < 15 * 60 * 1000) { S.samples = old; log(`Palautettiin ${old.length} riviä keskeytyneestä ajosta`); }
+  if (last && Date.now() - last < 15 * 60 * 1000) {
+    S.samples = old; const l = old[old.length - 1];
+    S.dist = +(l.dm ?? l.d) || 0; S.elapsed = +l.el || old.length;           // continue where the ride stopped
+    S.energy = old.reduce((e, r) => e + (+r.p || 0), 0);
+    log(`Palautettiin ${old.length} riviä keskeytyneestä ajosta (${(S.dist / 1000).toFixed(2)} km)`); }
   else localStorage.removeItem('polku_samples'); } catch {}
 document.addEventListener('keydown', e => {
   // Arrow keys, +/- and PageUp/PageDown (Bluetooth page turners / remotes)
